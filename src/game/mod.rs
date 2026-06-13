@@ -1,6 +1,6 @@
-pub mod arena;
 pub mod camera;
 pub mod enemy;
+pub mod map;
 pub mod music;
 pub mod player;
 pub mod state;
@@ -16,9 +16,9 @@ impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         app.init_state::<GameState>()
             .add_plugins((
-                arena::ArenaPlugin,
                 camera::CameraPlugin,
                 enemy::EnemyPlugin,
+                map::MapPlugin,
                 music::MusicPlugin,
                 player::PlayerPlugin,
             ))
