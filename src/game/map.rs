@@ -25,13 +25,13 @@ const MAP_PATH: &str = "assets/maps/arena.txt";
 const DEFAULT_MAP: &str = "\
 wwwwwwwwwwwwwwww
 wsxxxxxxxxxxxxsw
-wxxxxxxxxxxxxxxw
+wxxxxx1xx2xxxxxw
 wxxwwxxxxxxwwxxw
 wxxwwxxxxxxwwxxw
 wxxxxxxsxsxxxxxw
 wxxxxxxxxxxxxxxw
-wxxwwxxxxxxwwxxw
-wxxwwxxxxxxwwxxw
+wxxwwxx1xxxwwxxw
+wxxwwxxxx2xwwxxw
 wsxxxxxxxxxxxxsw
 wwwwwwwwwwwwwwww
 ";
@@ -52,6 +52,10 @@ pub enum Tile {
     Wall,
     /// Walkable floor that is also a player spawn location.
     Spawn,
+    /// Decorative box object (non-interactive for now); draws floor underneath.
+    Box1,
+    /// Second decorative box variant; draws floor underneath.
+    Box2,
 }
 
 impl Tile {
@@ -62,6 +66,8 @@ impl Tile {
             'x' => Tile::Floor,
             'w' => Tile::Wall,
             's' => Tile::Spawn,
+            '1' => Tile::Box1,
+            '2' => Tile::Box2,
             _ => Tile::Void,
         }
     }
@@ -74,6 +80,16 @@ impl Tile {
 
     fn is_wall(self) -> bool {
         matches!(self, Tile::Wall)
+    }
+
+    /// Asset path for a sprite drawn on top of the floor for this tile, if any.
+    /// Extension point for future object tiles (table, bush, ...).
+    fn object_sprite(self) -> Option<&'static str> {
+        match self {
+            Tile::Box1 => Some("box-1.png"),
+            Tile::Box2 => Some("box-2.png"),
+            _ => None,
+        }
     }
 }
 
@@ -275,6 +291,11 @@ pub struct CurrentMap(pub TileMap);
 #[derive(Component)]
 pub struct Wall;
 
+/// Marker for spawned decorative/object tiles (boxes, ...), so future systems
+/// (collision, interaction) can query them.
+#[derive(Component)]
+pub struct MapObject;
+
 pub struct MapPlugin;
 
 impl Plugin for MapPlugin {
@@ -329,6 +350,19 @@ fn spawn_map(mut commands: Commands, asset_server: Res<AssetServer>, map: Res<Cu
                     Wall,
                     Sprite {
                         image: asset_server.load(map.wall_sprite(col as i32, row as i32)),
+                        custom_size: Some(Vec2::splat(TILE_SIZE)),
+                        ..default()
+                    },
+                    Transform::from_xyz(center.x, center.y, 1.0),
+                    InGame,
+                ));
+            }
+
+            if let Some(sprite) = tile.object_sprite() {
+                commands.spawn((
+                    MapObject,
+                    Sprite {
+                        image: asset_server.load(sprite),
                         custom_size: Some(Vec2::splat(TILE_SIZE)),
                         ..default()
                     },
