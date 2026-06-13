@@ -25,9 +25,45 @@
         in
         {
           default = pkgs.mkShell {
-            packages = [
-              rust
+            nativeBuildInputs = [
+              pkgs.pkg-config
             ];
+
+            buildInputs = [
+              rust
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              # Graphics/windowing libraries required by Bevy/winit/wgpu on Linux
+              pkgs.wayland
+              pkgs.libxkbcommon
+              pkgs.libx11
+              pkgs.libxcursor
+              pkgs.libxrandr
+              pkgs.libxi
+              pkgs.libGL
+
+              # Audio/input
+              pkgs.alsa-lib
+              pkgs.udev
+
+              # Vulkan loader
+              pkgs.vulkan-loader
+            ];
+
+            shellHook = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+              export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [
+                pkgs.wayland
+                pkgs.libxkbcommon
+                pkgs.libx11
+                pkgs.libxcursor
+                pkgs.libxrandr
+                pkgs.libxi
+                pkgs.libGL
+                pkgs.alsa-lib
+                pkgs.udev
+                pkgs.vulkan-loader
+              ]}:$PWD/target/debug/deps''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            '';
           };
         });
     };
