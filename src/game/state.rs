@@ -1,11 +1,12 @@
 use bevy::prelude::*;
 
-/// High-level game state machine.
+/// High-level application state machine.
 ///
-/// The skeleton only implements `Playing`, but the state is already wired so
-/// future screens (menu, loading, game over) can be added without restructuring.
+/// The game starts in `Lobby` while waiting for the matchmaking server to pair
+/// players, then transitions to `InGame` once the GGRS P2P session is ready.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Hash, States)]
-pub enum GameState {
+pub enum AppState {
     #[default]
-    Playing,
+    Lobby,
+    InGame,
 }

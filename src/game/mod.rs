@@ -6,21 +6,20 @@ pub mod state;
 
 use bevy::prelude::*;
 
-use state::GameState;
+use state::AppState;
 
 /// Top-level plugin that wires up the entire game.
 pub struct GamePlugin;
 
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
-        app.init_state::<GameState>()
+        app.init_state::<AppState>()
             .add_plugins((
                 arena::ArenaPlugin,
                 camera::CameraPlugin,
-                enemy::EnemyPlugin,
                 player::PlayerPlugin,
             ))
-            .add_systems(OnExit(GameState::Playing), cleanup_ingame);
+            .add_systems(OnExit(AppState::InGame), cleanup_ingame);
     }
 }
 

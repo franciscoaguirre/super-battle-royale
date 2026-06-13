@@ -15,10 +15,10 @@ pub struct EnemyPlugin;
 
 impl Plugin for EnemyPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(super::state::GameState::Playing), spawn_enemies)
+        app.add_systems(OnEnter(super::state::AppState::InGame), spawn_enemies)
             .add_systems(
                 Update,
-                patrol_enemies.run_if(in_state(super::state::GameState::Playing)),
+                patrol_enemies.run_if(in_state(super::state::AppState::InGame)),
             );
     }
 }

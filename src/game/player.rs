@@ -1,100 +1,69 @@
 use bevy::prelude::*;
+use bevy_ggrs::{AddRollbackCommandExtension, PlayerInputs, Rollback, Session};
 
 use super::InGame;
 use super::arena::{ARENA_HEIGHT, ARENA_WIDTH};
+use crate::networking::config::{SbrConfig, INPUT_DOWN, INPUT_LEFT, INPUT_RIGHT, INPUT_UP};
 
 pub const PLAYER_SIZE: f32 = 32.0;
 const PLAYER_SPEED: f32 = 240.0;
 
+const PLAYER_COLORS: [Color; 2] = [
+    Color::srgb(0.2, 0.5, 0.95),
+    Color::srgb(0.95, 0.2, 0.2),
+];
+
 #[derive(Component)]
-pub struct Player;
-
-/// The visual color of a player. More variants can be chosen by the player once
-/// color selection is implemented.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum PlayerColor {
-    Red,
-    #[default]
-    Blue,
-    Green,
-    Orange,
-    Purple,
-    Yellow,
+pub struct Player {
+    pub handle: usize,
 }
-
-impl PlayerColor {
-    /// Path to the sprite for this color, relative to the `assets/` dir.
-    pub fn asset_path(self) -> &'static str {
-        match self {
-            PlayerColor::Red => "sphere_red.png",
-            PlayerColor::Blue => "sphere_blue.png",
-            PlayerColor::Green => "sphere_green.png",
-            PlayerColor::Orange => "sphere_orange.png",
-            PlayerColor::Purple => "sphere_purple.png",
-            PlayerColor::Yellow => "sphere_yellow.png",
-        }
-    }
-}
-
-/// The color the next player will spawn with. Defaults to [`PlayerColor::Blue`].
-#[derive(Resource, Default)]
-pub struct SelectedColor(pub PlayerColor);
 
 pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SelectedColor>()
-            .add_systems(OnEnter(super::state::GameState::Playing), spawn_player)
+        app.add_systems(OnEnter(super::state::AppState::InGame), spawn_players)
             .add_systems(
-                Update,
-                move_player.run_if(in_state(super::state::GameState::Playing)),
+                bevy_ggrs::GgrsSchedule,
+                move_players.run_if(in_state(super::state::AppState::InGame)),
             );
     }
 }
 
-fn spawn_player(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    selected: Res<SelectedColor>,
-) {
-    let color = selected.0;
-    commands.spawn((
-        Player,
-        color,
-        Sprite {
-            image: asset_server.load(color.asset_path()),
-            custom_size: Some(Vec2::splat(PLAYER_SIZE)),
-            ..default()
-        },
-        Transform::from_xyz(0.0, 0.0, 1.0),
-        InGame,
-    ));
+fn spawn_players(mut commands: Commands, session: Res<Session<SbrConfig>>) {
+    let num_players = match &*session {
+        Session::SyncTest(s) => s.num_players(),
+        Session::P2P(s) => s.num_players(),
+        Session::Spectator(s) => s.num_players(),
+    };
+
+    let start_offset = Vec2::new(ARENA_WIDTH / 4.0, 0.0);
+
+    for handle in 0..num_players {
+        let x = if handle == 0 { -start_offset.x } else { start_offset.x };
+        let color = PLAYER_COLORS[handle % PLAYER_COLORS.len()];
+
+        commands
+            .spawn((
+                Player { handle },
+                Sprite {
+                    color,
+                    custom_size: Some(Vec2::splat(PLAYER_SIZE)),
+                    ..default()
+                },
+                Transform::from_xyz(x, 0.0, 1.0),
+                InGame,
+            ))
+            .add_rollback();
+    }
 }
 
-fn move_player(
-    input: Res<ButtonInput<KeyCode>>,
+fn move_players(
+    inputs: Res<PlayerInputs<SbrConfig>>,
     time: Res<Time>,
-    mut query: Query<&mut Transform, With<Player>>,
+    mut query: Query<(&Player, &mut Transform), With<Rollback>>,
 ) {
-    let mut direction = Vec2::ZERO;
-
-    if input.pressed(KeyCode::KeyW) || input.pressed(KeyCode::ArrowUp) {
-        direction.y += 1.0;
-    }
-    if input.pressed(KeyCode::KeyS) || input.pressed(KeyCode::ArrowDown) {
-        direction.y -= 1.0;
-    }
-    if input.pressed(KeyCode::KeyA) || input.pressed(KeyCode::ArrowLeft) {
-        direction.x -= 1.0;
-    }
-    if input.pressed(KeyCode::KeyD) || input.pressed(KeyCode::ArrowRight) {
-        direction.x += 1.0;
-    }
-
-    if direction != Vec2::ZERO {
-        direction = direction.normalize();
-    }
+    let dt = time.delta().as_secs_f32();
 
     let half = PLAYER_SIZE / 2.0;
     let min_x = -ARENA_WIDTH / 2.0 + half;
@@ -102,8 +71,33 @@ fn move_player(
     let min_y = -ARENA_HEIGHT / 2.0 + half;
     let max_y = ARENA_HEIGHT / 2.0 - half;
 
-    for mut transform in &mut query {
-        transform.translation += direction.extend(0.0) * PLAYER_SPEED * time.delta_secs();
+    // Query iteration order is not deterministic across peers. Sort by handle
+    // so every client processes the players in the same order.
+    let mut players: Vec<_> = query.iter_mut().collect();
+    players.sort_by_key(|(player, _)| player.handle);
+
+    for (player, mut transform) in players {
+        let input = inputs[player.handle].0.inp;
+        let mut direction = Vec2::ZERO;
+
+        if input & INPUT_UP != 0 {
+            direction.y += 1.0;
+        }
+        if input & INPUT_DOWN != 0 {
+            direction.y -= 1.0;
+        }
+        if input & INPUT_LEFT != 0 {
+            direction.x -= 1.0;
+        }
+        if input & INPUT_RIGHT != 0 {
+            direction.x += 1.0;
+        }
+
+        if direction != Vec2::ZERO {
+            direction = direction.normalize();
+        }
+
+        transform.translation += direction.extend(0.0) * PLAYER_SPEED * dt;
         transform.translation.x = transform.translation.x.clamp(min_x, max_x);
         transform.translation.y = transform.translation.y.clamp(min_y, max_y);
     }

@@ -9,7 +9,7 @@ pub struct ArenaPlugin;
 
 impl Plugin for ArenaPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(super::state::GameState::Playing), spawn_arena);
+        app.add_systems(OnEnter(super::state::AppState::InGame), spawn_arena);
     }
 }
 

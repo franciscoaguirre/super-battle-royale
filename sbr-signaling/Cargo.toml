@@ -1,0 +1,11 @@
+[package]
+name = "sbr-signaling"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+matchbox_signaling = "0.14"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }

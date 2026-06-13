@@ -1,3 +1,7 @@
+[workspace]
+members = ["sbr-signaling"]
+resolver = "2"
+
 [package]
 name = "super-battle-royale"
 version = "0.1.0"
@@ -5,11 +9,13 @@ edition = "2024"
 
 [dependencies]
 bevy = { version = "0.18.1", features = ["dynamic_linking"] }
+bevy_ggrs = "0.20"
+bevy_matchbox = { version = "0.14", features = ["ggrs"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
 
-# Enable a small amount of optimization in the dev profile.
 [profile.dev]
 opt-level = 1
 
-# Enable a large amount of optimization in the dev profile for dependencies.
 [profile.dev.package."*"]
 opt-level = 3
