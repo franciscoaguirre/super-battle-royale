@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use super::InGame;
-use super::arena::{ARENA_HEIGHT, ARENA_WIDTH};
+use super::map::{ArenaBounds, CurrentMap};
 
 pub const PLAYER_SIZE: f32 = 32.0;
 const PLAYER_SPEED: f32 = 240.0;
@@ -57,8 +57,11 @@ fn spawn_player(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     selected: Res<SelectedColor>,
+    map: Res<CurrentMap>,
 ) {
     let color = selected.0;
+    // Spawn at the first spawn point on the map, falling back to the centre.
+    let spawn = map.0.spawn_points().first().copied().unwrap_or(Vec2::ZERO);
     commands.spawn((
         Player,
         color,
@@ -67,7 +70,7 @@ fn spawn_player(
             custom_size: Some(Vec2::splat(PLAYER_SIZE)),
             ..default()
         },
-        Transform::from_xyz(0.0, 0.0, 1.0),
+        Transform::from_xyz(spawn.x, spawn.y, 10.0),
         InGame,
     ));
 }
@@ -75,6 +78,7 @@ fn spawn_player(
 fn move_player(
     input: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
+    bounds: Res<ArenaBounds>,
     mut query: Query<&mut Transform, With<Player>>,
 ) {
     let mut direction = Vec2::ZERO;
@@ -97,14 +101,10 @@ fn move_player(
     }
 
     let half = PLAYER_SIZE / 2.0;
-    let min_x = -ARENA_WIDTH / 2.0 + half;
-    let max_x = ARENA_WIDTH / 2.0 - half;
-    let min_y = -ARENA_HEIGHT / 2.0 + half;
-    let max_y = ARENA_HEIGHT / 2.0 - half;
-
     for mut transform in &mut query {
         transform.translation += direction.extend(0.0) * PLAYER_SPEED * time.delta_secs();
-        transform.translation.x = transform.translation.x.clamp(min_x, max_x);
-        transform.translation.y = transform.translation.y.clamp(min_y, max_y);
+        let clamped = bounds.clamp(transform.translation.truncate(), half);
+        transform.translation.x = clamped.x;
+        transform.translation.y = clamped.y;
     }
 }

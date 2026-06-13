@@ -1,0 +1,25 @@
+# Super Battle Royale - arena map
+#
+# One character per tile. Edit this file and re-run the game to see changes.
+# Lines starting with `#` and blank lines are ignored.
+#
+# Legend:
+#   w  wall   (auto-tiled: direction and end caps are detected from neighbours)
+#   x  floor  (walkable)
+#   s  spawn  (walkable; players spawn here)
+#   (space) / .  void (nothing rendered)
+#
+# More tile types (table, bush, chair, pickup spawn, ...) can be added later by
+# extending `Tile::from_char` in src/game/map.rs.
+
+wwwwwwwwwwwwwwww
+wsxxxxxxxxxxxxsw
+wxxxxxxxxxxxxxxw
+wxxwwxxxxxxwwxxw
+wxxwwxxxxxxwwxxw
+wxxxxxxsxsxxxxxw
+wxxxxxxxxxxxxxxw
+wxxwwxxxxxxwwxxw
+wxxwwxxxxxxwwxxw
+wsxxxxxxxxxxxxsw
+wwwwwwwwwwwwwwww
