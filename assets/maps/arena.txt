@@ -11,6 +11,13 @@
 #
 # More tile types (table, bush, chair, pickup spawn, ...) can be added later by
 # extending `Tile::from_char` in src/game/map.rs.
+#
+# Directives (key: value) configure the map. Currently supported:
+#   song: <name>   background track; one of
+#                  shooter_loop | funky | playful | rocky | sinister
+#                  (omit for the default, shooter_loop)
+
+song: shooter_loop
 
 wwwwwwwwwwwwwwww
 wsxxxxxxxxxxxxsw
