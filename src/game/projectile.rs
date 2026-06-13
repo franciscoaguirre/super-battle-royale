@@ -225,7 +225,7 @@ fn simulate_projectiles(
         let out_of_bounds =
             p.x < bounds.min.x || p.x > bounds.max.x || p.y < bounds.min.y || p.y > bounds.max.y;
         if height.0 <= GROUND_LEVEL {
-            spawn_impact(&mut commands, ImpactKind::Ground);
+            spawn_impact(&mut commands, ImpactKind::Ground, pos.0);
             commands.entity(entity).despawn();
         } else if out_of_bounds {
             commands.entity(entity).despawn();
@@ -233,10 +233,12 @@ fn simulate_projectiles(
     }
 }
 
-/// Spawns a replicated impact marker so clients play the matching sound.
-pub(crate) fn spawn_impact(commands: &mut Commands, kind: ImpactKind) {
+/// Spawns a replicated impact marker (carrying where it happened) so clients can
+/// play the matching sound and spawn visual effects there.
+pub(crate) fn spawn_impact(commands: &mut Commands, kind: ImpactKind, position: Vec2) {
     commands.spawn((
         Impact(kind),
+        NetPos(position),
         ImpactLifetime(Timer::from_seconds(IMPACT_LIFETIME, TimerMode::Once)),
         Replicated,
     ));
@@ -313,7 +315,7 @@ fn offline_shoot(
 
 /// A bright HDR (linear > 1.0) version of a player's color, so the shot blooms.
 #[cfg(feature = "client")]
-fn shot_glow(color: PlayerColor) -> Color {
+pub(crate) fn shot_glow(color: PlayerColor) -> Color {
     match color {
         PlayerColor::Red => Color::linear_rgb(8.0, 1.5, 1.5),
         PlayerColor::Blue => Color::linear_rgb(1.5, 3.0, 8.0),
