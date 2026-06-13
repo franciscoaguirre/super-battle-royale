@@ -1,6 +1,7 @@
 pub mod arena;
 pub mod camera;
 pub mod enemy;
+pub mod music;
 pub mod player;
 pub mod state;
 
@@ -18,6 +19,7 @@ impl Plugin for GamePlugin {
                 arena::ArenaPlugin,
                 camera::CameraPlugin,
                 enemy::EnemyPlugin,
+                music::MusicPlugin,
                 player::PlayerPlugin,
             ))
             .add_systems(OnExit(GameState::Playing), cleanup_ingame);
