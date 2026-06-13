@@ -26,8 +26,11 @@ use bevy_replicon_renet::{
 };
 
 use super_battle_royale::game::enemy::Enemy;
-use super_battle_royale::game::net::{NetPos, PROTOCOL_ID, PlayerInput, register_protocol};
+use super_battle_royale::game::net::{
+    NetPos, PROTOCOL_ID, PlayerInput, ShootRequest, register_protocol,
+};
 use super_battle_royale::game::player::{Player, PlayerColor};
+use super_battle_royale::game::projectile::{Height, Projectile};
 
 const PLAYER_POS: Vec2 = Vec2::new(12.0, -34.0);
 const ENEMY_POS: Vec2 = Vec2::new(-5.0, 7.0);
@@ -96,6 +99,122 @@ fn replicates_world_and_receives_input() {
         server_app.world().resource::<ReceivedInput>().0,
         Some(TEST_INPUT),
         "server should have received the client's input"
+    );
+}
+
+/// Set to true once the client has sent its one shoot request.
+#[derive(Resource, Default)]
+struct Sent(bool);
+
+/// Drives the shoot client-event end to end: the client sends a `ShootRequest`,
+/// the server reacts by spawning a projectile, and that projectile (with its
+/// altitude) replicates back to the client.
+#[test]
+fn fires_and_replicates_projectile() {
+    const SHOT_POS: Vec2 = Vec2::new(3.0, 4.0);
+    const SHOT_HEIGHT: f32 = 25.0;
+
+    let mut server_app = build_app();
+    let mut client_app = build_app();
+
+    // Server: on a shoot request, spawn a replicated projectile.
+    server_app.add_observer(
+        move |_req: On<FromClient<ShootRequest>>, mut commands: Commands| {
+            commands.spawn((
+                Projectile,
+                NetPos(SHOT_POS),
+                Height(SHOT_HEIGHT),
+                Replicated,
+            ));
+        },
+    );
+
+    // Client: send exactly one shoot request once connected.
+    client_app.init_resource::<Sent>();
+    client_app.add_systems(
+        Update,
+        (|mut commands: Commands, mut sent: ResMut<Sent>| {
+            if !sent.0 {
+                commands.client_trigger(ShootRequest);
+                sent.0 = true;
+            }
+        })
+        .run_if(in_state(ClientState::Connected)),
+    );
+
+    let port = setup_server(&mut server_app);
+    setup_client(&mut client_app, port);
+    wait_for_connection(&mut server_app, &mut client_app);
+    for _ in 0..100 {
+        client_app.update();
+        server_app.update();
+    }
+
+    let mut projectiles = client_app
+        .world_mut()
+        .query_filtered::<&Height, With<Projectile>>();
+    let height = projectiles
+        .single(client_app.world())
+        .expect("client should see exactly one replicated projectile");
+    assert_eq!(height.0, SHOT_HEIGHT);
+}
+
+/// Exercises the authoritative combat loop directly (no networking): a shot
+/// damages a non-owner player by a fixed amount, never damages its owner, and a
+/// player reaching zero health is marked `Dead`.
+#[test]
+fn projectile_damages_and_kills_non_owner() {
+    use super_battle_royale::game::combat::{CombatPlugin, Dead, Health};
+    use super_battle_royale::game::map::{CurrentMap, TileMap};
+    use super_battle_royale::game::net::NetRole;
+    use super_battle_royale::game::player::Player;
+    use super_battle_royale::game::projectile::{Impact, ImpactKind, Projectile, ProjectileOwner};
+    use super_battle_royale::game::state::GameState;
+
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin));
+    app.init_state::<GameState>();
+    app.insert_resource(NetRole::Server);
+    app.insert_resource(CurrentMap(TileMap::parse("wsw")));
+
+    // Two players on the same spot: the shooter (owner) and the target.
+    let shooter = app.world_mut().spawn((Player, NetPos(Vec2::ZERO))).id();
+    let target = app.world_mut().spawn((Player, NetPos(Vec2::ZERO))).id();
+
+    // First tick gives both players full health.
+    app.update();
+    assert_eq!(app.world().get::<Health>(target).unwrap().current, 100.0);
+
+    // Each shot owned by the shooter deals 25 damage to the target only.
+    for expected in [75.0, 50.0, 25.0] {
+        app.world_mut()
+            .spawn((Projectile, ProjectileOwner(shooter), NetPos(Vec2::ZERO)));
+        app.update();
+        assert_eq!(app.world().get::<Health>(target).unwrap().current, expected);
+        assert!(app.world().get::<Dead>(target).is_none());
+    }
+    assert_eq!(
+        app.world().get::<Health>(shooter).unwrap().current,
+        100.0,
+        "a shot must never damage its owner"
+    );
+
+    // The fourth shot drops the target to zero and marks it dead.
+    app.world_mut()
+        .spawn((Projectile, ProjectileOwner(shooter), NetPos(Vec2::ZERO)));
+    app.update();
+    assert!(
+        app.world().get::<Dead>(target).is_some(),
+        "target should be Dead at 0 HP"
+    );
+
+    // Hits spawn an "object" impact marker (which drives the hit-object sound).
+    let mut impacts = app.world_mut().query::<&Impact>();
+    assert!(
+        impacts
+            .iter(app.world())
+            .any(|impact| impact.0 == ImpactKind::Object),
+        "a player hit should spawn an Object impact"
     );
 }
 

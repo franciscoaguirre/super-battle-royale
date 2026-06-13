@@ -43,7 +43,7 @@ There are **two thin binaries** over one **library** crate (`lib.rs` → `src/ga
 
 ### The plugin-per-subsystem pattern
 
-This is the core convention — **follow it when adding features**. Each subsystem is one file under `src/game/` exposing an `XxxPlugin` (`camera`, `enemy`, `footsteps`, `map`, `music`, `player`; networking lives in `src/game/net/`). To add a subsystem: create the module, define its `Plugin`, and add it to the appropriate `add_plugins((...))` group in `mod.rs` (gate render/audio-only plugins behind `#[cfg(feature = "client")]`). A plugin owns its components, constants, spawn system, and update systems.
+This is the core convention — **follow it when adding features**. Each subsystem is one file under `src/game/` exposing an `XxxPlugin` (`camera`, `combat`, `enemy`, `footsteps`, `map`, `music`, `player`, `projectile`; networking lives in `src/game/net/`). To add a subsystem: create the module, define its `Plugin`, and add it to the appropriate `add_plugins((...))` group in `mod.rs` (gate render/audio-only plugins behind `#[cfg(feature = "client")]`). A plugin owns its components, constants, spawn system, and update systems.
 
 ### State + entity lifecycle
 
@@ -69,7 +69,11 @@ Authoritative client/server via [`bevy_replicon`](https://docs.rs/bevy_replicon)
 - **Players are the client entity.** On the server, connecting clients are entities; `on_client_authorized` (observer on `Add, AuthorizedClient`) attaches `Player`/`PlayerColor`/`NetPos`/`PlayerIntent`/`Replicated` to the client entity, so the renet backend auto-despawns the player (and propagates removal) on disconnect.
 - **Client sprite attachment.** Server-spawned and replicated-in entities have no sprite; `attach_player_sprite`/`attach_enemy_sprite` (client only) add the `Sprite`/`Transform`/`InGame` to any matching entity that lacks one — covering both the offline local spawn and replicated remote entities through one path.
 
-The integration test `tests/replication.rs` (run with `cargo test --features server`) connects a headless client+server over loopback and asserts replication and input flow end-to-end.
+- **Shooting** (`src/game/projectile.rs`) reuses all of the above. Pressing **Space** fires a shot in the player's last-moved direction (`Facing`, a server/sim-only component updated from `PlayerIntent`). A shot flies straight at constant horizontal speed while its altitude (`Height`) sinks under gentle gravity, then despawns when it "crashes" into the ground. `Projectile` + `Height` are replicated (added in `register_protocol`); velocity is server/sim-only. Offline fires the local player directly; online sends a `ShootRequest` client-event and the server fires via the `receive_shoot` observer. Clients draw the descent with a child shadow (`render_projectiles`); projectiles are excluded from `sync_netpos_to_transform` because they carry altitude. No damage yet.
+
+- **Combat** (`src/game/combat.rs`) is **PvP only** — the patrolling enemies ("bots") are deliberately ignored, so shots pass through them. A shot damages the first non-owner player it touches (within `HIT_RADIUS`, owner tracked via `ProjectileOwner` on the projectile). `Health` is server/sim-only (no HUD yet, so not replicated); at 0 HP a player gets the replicated `Dead` marker + a `RespawnTimer`, and after a short delay respawns at a spawn point with full health. `Dead` is replicated so clients hide dead players (`hide_dead_players`); dead players can't move or shoot (systems filter `Without<Dead>`). All of this is authoritative (server + offline); offline single-player simply has no other player to damage.
+
+The integration test `tests/replication.rs` (run with `cargo test --features server`) connects a headless client+server over loopback and asserts replication, input, and the shoot→projectile flow end-to-end, plus a direct test of the damage→death combat loop.
 
 ### Assets
 

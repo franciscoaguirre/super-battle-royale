@@ -1,8 +1,10 @@
+pub mod combat;
 pub mod enemy;
 pub mod map;
 pub mod music;
 pub mod net;
 pub mod player;
+pub mod projectile;
 pub mod state;
 
 // Rendering-only subsystems live in the windowed client; the headless server
@@ -29,7 +31,13 @@ pub struct GamePlugin;
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         app.init_state::<GameState>()
-            .add_plugins((enemy::EnemyPlugin, map::MapPlugin, player::PlayerPlugin))
+            .add_plugins((
+                combat::CombatPlugin,
+                enemy::EnemyPlugin,
+                map::MapPlugin,
+                player::PlayerPlugin,
+                projectile::ProjectilePlugin,
+            ))
             .add_systems(OnExit(GameState::Playing), cleanup_ingame);
 
         #[cfg(feature = "client")]

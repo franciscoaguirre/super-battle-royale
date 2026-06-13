@@ -15,9 +15,11 @@ use bevy_replicon_renet::{
     renet::ConnectionConfig,
 };
 
-use super::{NetPos, PROTOCOL_ID, PlayerInput, register_protocol};
+use super::{NetPos, PROTOCOL_ID, PlayerInput, ShootRequest, register_protocol};
+use crate::game::combat::Dead;
 use crate::game::map::CurrentMap;
 use crate::game::player::{Player, PlayerColor, PlayerIntent};
+use crate::game::projectile::{Facing, FireCooldown, try_fire};
 
 /// Maximum simultaneous players.
 const MAX_CLIENTS: usize = 64;
@@ -39,7 +41,8 @@ impl Plugin for ServerNetPlugin {
             .add_systems(Startup, setup_server)
             // A client is `AuthorizedClient` once its protocol hash matches ours.
             .add_observer(on_client_authorized)
-            .add_observer(receive_input);
+            .add_observer(receive_input)
+            .add_observer(receive_shoot);
     }
 }
 
@@ -111,5 +114,19 @@ fn receive_input(input: On<FromClient<PlayerInput>>, mut players: Query<&mut Pla
         && let Ok(mut intent) = players.get_mut(entity)
     {
         intent.0 = input.dir;
+    }
+}
+
+/// Fires a shot for the sending client's player, in its tracked facing.
+/// Dead players (awaiting respawn) can't shoot.
+fn receive_shoot(
+    request: On<FromClient<ShootRequest>>,
+    mut commands: Commands,
+    mut players: Query<(&NetPos, &Facing, &mut FireCooldown), Without<Dead>>,
+) {
+    if let Some(entity) = request.client_id.entity()
+        && let Ok((pos, facing, mut cooldown)) = players.get_mut(entity)
+    {
+        try_fire(&mut commands, entity, pos, facing, &mut cooldown);
     }
 }

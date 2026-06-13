@@ -22,13 +22,15 @@ pub mod client;
 #[cfg(feature = "server")]
 pub mod server;
 
-pub use protocol::{NetPos, PlayerInput};
+pub use protocol::{NetPos, PlayerInput, ShootRequest};
 
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 
+use super::combat::Dead;
 use super::enemy::Enemy;
 use super::player::{Player, PlayerColor};
+use super::projectile::{Height, Impact, Projectile};
 
 /// Default UDP port the server listens on and clients connect to.
 pub const DEFAULT_PORT: u16 = 5000;
@@ -58,7 +60,12 @@ pub fn register_protocol(app: &mut App) {
         .replicate::<Player>()
         .replicate::<PlayerColor>()
         .replicate::<Enemy>()
-        .add_client_event::<PlayerInput>(Channel::Unreliable);
+        .replicate::<Projectile>()
+        .replicate::<Height>()
+        .replicate::<Impact>()
+        .replicate::<Dead>()
+        .add_client_event::<PlayerInput>(Channel::Unreliable)
+        .add_client_event::<ShootRequest>(Channel::Ordered);
 }
 
 /// True when this instance owns the simulation: offline single-player or the
@@ -85,7 +92,8 @@ pub fn is_online_client(role: Res<NetRole>) -> bool {
 pub fn sync_netpos_to_transform(
     role: Res<NetRole>,
     time: Res<Time>,
-    mut query: Query<(&NetPos, &mut Transform)>,
+    // Projectiles carry an altitude and are positioned by `render_projectiles`.
+    mut query: Query<(&NetPos, &mut Transform), Without<Projectile>>,
 ) {
     let online = *role == NetRole::OnlineClient;
     for (pos, mut transform) in &mut query {
