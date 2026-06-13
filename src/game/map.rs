@@ -11,6 +11,7 @@
 use bevy::prelude::*;
 
 use super::InGame;
+use super::music::Song;
 use super::state::GameState;
 
 /// Side length, in world units, of a single map tile. All tile art is 64x64.
@@ -84,15 +85,35 @@ pub struct TileMap {
     height: usize,
     tiles: Vec<Tile>,
     spawns: Vec<Vec2>,
+    song: Song,
 }
 
 impl TileMap {
-    /// Parses a map from text. Each non-empty, non-comment line is one row; rows
-    /// are padded on the right with [`Tile::Void`] to the width of the widest row.
+    /// Parses a map from text. Blank lines and `#` comments are ignored. A line
+    /// of the form `key: value` is a directive (currently only `song:`); every
+    /// other line is one grid row, padded on the right with [`Tile::Void`] to the
+    /// width of the widest row. Grid rows only contain tile characters, so the
+    /// presence of a `:` unambiguously marks a directive.
     pub fn parse(text: &str) -> TileMap {
+        let mut song = Song::default();
         let rows: Vec<&str> = text
             .lines()
             .filter(|line| !line.is_empty() && !line.trim_start().starts_with('#'))
+            .filter(|line| match line.split_once(':') {
+                Some((key, value)) => {
+                    match key.trim() {
+                        "song" => match Song::from_name(value) {
+                            Some(s) => song = s,
+                            None => {
+                                warn!("unknown song `{}` in map; using default", value.trim())
+                            }
+                        },
+                        other => warn!("unknown map directive `{other}`; ignoring"),
+                    }
+                    false // directive line, not a grid row
+                }
+                None => true,
+            })
             .collect();
 
         let width = rows
@@ -114,6 +135,7 @@ impl TileMap {
             height,
             tiles,
             spawns: Vec::new(),
+            song,
         };
 
         // Precompute spawn points in world space now that the size is known.
@@ -148,6 +170,12 @@ impl TileMap {
     /// World-space player spawn points, in reading order (top-left first).
     pub fn spawn_points(&self) -> &[Vec2] {
         &self.spawns
+    }
+
+    /// The background track this map requests, defaulting to [`Song::ShooterLoop`]
+    /// when the map file has no `song:` directive.
+    pub fn song(&self) -> Song {
+        self.song
     }
 
     /// World-space centre of cell `(col, row)`. Row 0 is the top of the file,
@@ -309,5 +337,36 @@ fn spawn_map(mut commands: Commands, asset_server: Res<AssetServer>, map: Res<Cu
                 ));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn song_directive_selects_track_without_becoming_a_row() {
+        let map = TileMap::parse("song: rocky\nwsw");
+        assert_eq!(map.song(), Song::Rocky);
+        // The directive line must not be parsed as a grid row.
+        assert_eq!(map.width, 3);
+        assert_eq!(map.height, 1);
+    }
+
+    #[test]
+    fn missing_song_directive_defaults_to_shooter_loop() {
+        assert_eq!(TileMap::parse("wsw").song(), Song::ShooterLoop);
+    }
+
+    #[test]
+    fn unknown_song_falls_back_to_default() {
+        assert_eq!(TileMap::parse("song: nope\nwsw").song(), Song::ShooterLoop);
+    }
+
+    #[test]
+    fn from_name_is_case_insensitive() {
+        assert_eq!(Song::from_name("Sinister"), Some(Song::Sinister));
+        assert_eq!(Song::from_name("  funky "), Some(Song::Funky));
+        assert_eq!(Song::from_name("does-not-exist"), None);
     }
 }
