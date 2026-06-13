@@ -9,11 +9,43 @@ const PLAYER_SPEED: f32 = 240.0;
 #[derive(Component)]
 pub struct Player;
 
+/// The visual color of a player. More variants can be chosen by the player once
+/// color selection is implemented.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PlayerColor {
+    Red,
+    #[default]
+    Blue,
+    Green,
+    Orange,
+    Purple,
+    Yellow,
+}
+
+impl PlayerColor {
+    /// Path to the sprite for this color, relative to the `assets/` dir.
+    pub fn asset_path(self) -> &'static str {
+        match self {
+            PlayerColor::Red => "sphere_red.png",
+            PlayerColor::Blue => "sphere_blue.png",
+            PlayerColor::Green => "sphere_green.png",
+            PlayerColor::Orange => "sphere_orange.png",
+            PlayerColor::Purple => "sphere_purple.png",
+            PlayerColor::Yellow => "sphere_yellow.png",
+        }
+    }
+}
+
+/// The color the next player will spawn with. Defaults to [`PlayerColor::Blue`].
+#[derive(Resource, Default)]
+pub struct SelectedColor(pub PlayerColor);
+
 pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(super::state::GameState::Playing), spawn_player)
+        app.init_resource::<SelectedColor>()
+            .add_systems(OnEnter(super::state::GameState::Playing), spawn_player)
             .add_systems(
                 Update,
                 move_player.run_if(in_state(super::state::GameState::Playing)),
@@ -21,11 +53,17 @@ impl Plugin for PlayerPlugin {
     }
 }
 
-fn spawn_player(mut commands: Commands) {
+fn spawn_player(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    selected: Res<SelectedColor>,
+) {
+    let color = selected.0;
     commands.spawn((
         Player,
+        color,
         Sprite {
-            color: Color::srgb(0.2, 0.5, 0.95),
+            image: asset_server.load(color.asset_path()),
             custom_size: Some(Vec2::splat(PLAYER_SIZE)),
             ..default()
         },

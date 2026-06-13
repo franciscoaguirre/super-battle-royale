@@ -13,12 +13,17 @@ impl Plugin for ArenaPlugin {
     }
 }
 
-fn spawn_arena(mut commands: Commands) {
-    // Grass background
+fn spawn_arena(mut commands: Commands, asset_server: Res<AssetServer>) {
+    // Tiled floor
     commands.spawn((
         Sprite {
-            color: Color::srgb(0.15, 0.45, 0.15),
+            image: asset_server.load("floor-tiles.png"),
             custom_size: Some(Vec2::new(ARENA_WIDTH, ARENA_HEIGHT)),
+            image_mode: SpriteImageMode::Tiled {
+                tile_x: true,
+                tile_y: true,
+                stretch_value: 1.0,
+            },
             ..default()
         },
         Transform::from_xyz(0.0, 0.0, 0.0),
