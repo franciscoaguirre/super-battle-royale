@@ -23,10 +23,7 @@ pub struct PlayerPlugin;
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(super::state::AppState::InGame), spawn_players)
-            .add_systems(
-                bevy_ggrs::GgrsSchedule,
-                move_players.run_if(in_state(super::state::AppState::InGame)),
-            );
+            .add_systems(bevy_ggrs::GgrsSchedule, move_players);
     }
 }
 

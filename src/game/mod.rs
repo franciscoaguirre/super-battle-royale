@@ -17,7 +17,6 @@ impl Plugin for GamePlugin {
         app.init_state::<AppState>()
             .add_plugins((
                 camera::CameraPlugin,
-                enemy::EnemyPlugin,
                 map::MapPlugin,
                 music::MusicPlugin,
                 player::PlayerPlugin,
