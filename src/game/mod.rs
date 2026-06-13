@@ -1,5 +1,6 @@
 pub mod camera;
 pub mod enemy;
+pub mod footsteps;
 pub mod map;
 pub mod music;
 pub mod player;
@@ -18,6 +19,7 @@ impl Plugin for GamePlugin {
             .add_plugins((
                 camera::CameraPlugin,
                 enemy::EnemyPlugin,
+                footsteps::FootstepsPlugin,
                 map::MapPlugin,
                 music::MusicPlugin,
                 player::PlayerPlugin,
