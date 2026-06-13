@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy_ggrs::{AddRollbackCommandExtension, PlayerInputs, Rollback, Session};
 
 use super::InGame;
-use super::arena::{ARENA_HEIGHT, ARENA_WIDTH};
+use super::map::{ArenaBounds, CurrentMap};
 use crate::networking::config::{SbrConfig, INPUT_DOWN, INPUT_LEFT, INPUT_RIGHT, INPUT_UP};
 
 pub const PLAYER_SIZE: f32 = 32.0;
@@ -30,17 +30,19 @@ impl Plugin for PlayerPlugin {
     }
 }
 
-fn spawn_players(mut commands: Commands, session: Res<Session<SbrConfig>>) {
+fn spawn_players(mut commands: Commands, session: Res<Session<SbrConfig>>, map: Res<CurrentMap>) {
     let num_players = match &*session {
         Session::SyncTest(s) => s.num_players(),
         Session::P2P(s) => s.num_players(),
         Session::Spectator(s) => s.num_players(),
     };
 
-    let start_offset = Vec2::new(ARENA_WIDTH / 4.0, 0.0);
+    let spawns = map.0.spawn_points();
 
     for handle in 0..num_players {
-        let x = if handle == 0 { -start_offset.x } else { start_offset.x };
+        // Place each player on the map's spawn points in order, falling back to
+        // the origin if the map declares fewer spawns than there are players.
+        let position = spawns.get(handle).copied().unwrap_or(Vec2::ZERO);
         let color = PLAYER_COLORS[handle % PLAYER_COLORS.len()];
 
         commands
@@ -51,7 +53,7 @@ fn spawn_players(mut commands: Commands, session: Res<Session<SbrConfig>>) {
                     custom_size: Some(Vec2::splat(PLAYER_SIZE)),
                     ..default()
                 },
-                Transform::from_xyz(x, 0.0, 1.0),
+                Transform::from_xyz(position.x, position.y, 10.0),
                 InGame,
             ))
             .add_rollback();
@@ -61,15 +63,11 @@ fn spawn_players(mut commands: Commands, session: Res<Session<SbrConfig>>) {
 fn move_players(
     inputs: Res<PlayerInputs<SbrConfig>>,
     time: Res<Time>,
+    bounds: Res<ArenaBounds>,
     mut query: Query<(&Player, &mut Transform), With<Rollback>>,
 ) {
     let dt = time.delta().as_secs_f32();
-
     let half = PLAYER_SIZE / 2.0;
-    let min_x = -ARENA_WIDTH / 2.0 + half;
-    let max_x = ARENA_WIDTH / 2.0 - half;
-    let min_y = -ARENA_HEIGHT / 2.0 + half;
-    let max_y = ARENA_HEIGHT / 2.0 - half;
 
     // Query iteration order is not deterministic across peers. Sort by handle
     // so every client processes the players in the same order.
@@ -98,7 +96,8 @@ fn move_players(
         }
 
         transform.translation += direction.extend(0.0) * PLAYER_SPEED * dt;
-        transform.translation.x = transform.translation.x.clamp(min_x, max_x);
-        transform.translation.y = transform.translation.y.clamp(min_y, max_y);
+        let clamped = bounds.clamp(transform.translation.truncate(), half);
+        transform.translation.x = clamped.x;
+        transform.translation.y = clamped.y;
     }
 }

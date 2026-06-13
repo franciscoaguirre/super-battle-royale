@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use super::InGame;
-use super::arena::{ARENA_HEIGHT, ARENA_WIDTH};
+use super::map::ArenaBounds;
 
 pub const ENEMY_SIZE: f32 = 32.0;
 const ENEMY_SPEED: f32 = 120.0;
@@ -40,18 +40,22 @@ fn spawn_enemies(mut commands: Commands) {
                 custom_size: Some(Vec2::splat(ENEMY_SIZE)),
                 ..default()
             },
-            Transform::from_xyz(pos.x, pos.y, 1.0),
+            Transform::from_xyz(pos.x, pos.y, 10.0),
             InGame,
         ));
     }
 }
 
-fn patrol_enemies(time: Res<Time>, mut query: Query<(&mut Transform, &mut Enemy)>) {
+fn patrol_enemies(
+    time: Res<Time>,
+    bounds: Res<ArenaBounds>,
+    mut query: Query<(&mut Transform, &mut Enemy)>,
+) {
     let half = ENEMY_SIZE / 2.0;
-    let min_x = -ARENA_WIDTH / 2.0 + half;
-    let max_x = ARENA_WIDTH / 2.0 - half;
-    let min_y = -ARENA_HEIGHT / 2.0 + half;
-    let max_y = ARENA_HEIGHT / 2.0 - half;
+    let min_x = bounds.min.x + half;
+    let max_x = bounds.max.x - half;
+    let min_y = bounds.min.y + half;
+    let max_y = bounds.max.y - half;
 
     for (mut transform, mut enemy) in &mut query {
         let delta = enemy.direction * ENEMY_SPEED * time.delta_secs();

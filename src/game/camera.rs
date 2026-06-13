@@ -2,7 +2,7 @@ use bevy::camera::ScalingMode;
 use bevy::prelude::*;
 
 use super::InGame;
-use super::arena::ARENA_HEIGHT;
+use super::map::ArenaBounds;
 
 pub struct CameraPlugin;
 
@@ -12,13 +12,14 @@ impl Plugin for CameraPlugin {
     }
 }
 
-fn spawn_camera(mut commands: Commands) {
-    // Fixed camera that shows the entire arena regardless of window size.
+fn spawn_camera(mut commands: Commands, bounds: Res<ArenaBounds>) {
+    // Fixed camera that shows the entire arena (plus a small margin) regardless
+    // of window size.
     commands.spawn((
         Camera2d,
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical {
-                viewport_height: ARENA_HEIGHT + 80.0,
+                viewport_height: bounds.size().y + 80.0,
             },
             ..OrthographicProjection::default_2d()
         }),
