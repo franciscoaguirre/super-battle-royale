@@ -122,11 +122,11 @@ fn receive_input(input: On<FromClient<PlayerInput>>, mut players: Query<&mut Pla
 fn receive_shoot(
     request: On<FromClient<ShootRequest>>,
     mut commands: Commands,
-    mut players: Query<(&NetPos, &Facing, &mut FireCooldown), Without<Dead>>,
+    mut players: Query<(&NetPos, &Facing, &mut FireCooldown, &PlayerColor), Without<Dead>>,
 ) {
     if let Some(entity) = request.client_id.entity()
-        && let Ok((pos, facing, mut cooldown)) = players.get_mut(entity)
+        && let Ok((pos, facing, mut cooldown, color)) = players.get_mut(entity)
     {
-        try_fire(&mut commands, entity, pos, facing, &mut cooldown);
+        try_fire(&mut commands, entity, *color, pos, facing, &mut cooldown);
     }
 }

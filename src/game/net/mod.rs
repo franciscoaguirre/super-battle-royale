@@ -30,7 +30,7 @@ use bevy_replicon::prelude::*;
 use super::combat::Dead;
 use super::enemy::Enemy;
 use super::player::{Player, PlayerColor};
-use super::projectile::{Height, Impact, Projectile};
+use super::projectile::{Height, Impact, Projectile, ShotColor};
 
 /// Default UDP port the server listens on and clients connect to.
 pub const DEFAULT_PORT: u16 = 5000;
@@ -62,6 +62,7 @@ pub fn register_protocol(app: &mut App) {
         .replicate::<Enemy>()
         .replicate::<Projectile>()
         .replicate::<Height>()
+        .replicate::<ShotColor>()
         .replicate::<Impact>()
         .replicate::<Dead>()
         .add_client_event::<PlayerInput>(Channel::Unreliable)

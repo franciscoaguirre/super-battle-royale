@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use super::map::ArenaBounds;
 use super::net::{NetPos, is_authoritative};
-use super::player::{Player, PlayerIntent};
+use super::player::{Player, PlayerColor, PlayerIntent};
 use super::state::GameState;
 
 #[cfg(feature = "client")]
@@ -48,9 +48,13 @@ const IMPACT_LIFETIME: f32 = 0.3;
 const PROJECTILE_SIZE: f32 = PROJECTILE_RADIUS * 2.0;
 
 #[cfg(feature = "client")]
-const PROJECTILE_COLOR: Color = Color::srgb(1.0, 0.9, 0.2);
-#[cfg(feature = "client")]
 const SHADOW_COLOR: Color = Color::srgba(0.0, 0.0, 0.0, 0.35);
+
+// Glowing motion trail: each frame drops a fading segment behind the shot.
+#[cfg(feature = "client")]
+const TRAIL_LIFETIME: f32 = 0.22;
+#[cfg(feature = "client")]
+const TRAIL_SIZE: f32 = PROJECTILE_SIZE * 0.85;
 
 // Sound effects, all played non-spatially (the whole arena is on screen).
 #[cfg(feature = "client")]
@@ -70,6 +74,10 @@ pub struct Projectile;
 /// sprite upward by this; simulation lowers it under gravity until it crashes.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
 pub struct Height(pub f32);
+
+/// The firing player's color, replicated so the shot and its trail glow to match.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
+pub struct ShotColor(pub PlayerColor);
 
 /// Server/sim-only velocity of a shot. Not replicated (clients only need the
 /// resulting [`NetPos`]/[`Height`]).
@@ -96,6 +104,15 @@ pub struct FireCooldown(pub Timer);
 #[cfg(feature = "client")]
 #[derive(Component)]
 pub struct ProjectileShadow;
+
+/// Client-only fading segment of a shot's glowing trail. Holds its own lifetime
+/// and the (full-brightness) glow color to fade from.
+#[cfg(feature = "client")]
+#[derive(Component)]
+struct TrailSegment {
+    timer: Timer,
+    glow: Color,
+}
 
 /// What a shot struck when it ended, used to pick the impact sound.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -146,6 +163,8 @@ impl Plugin for ProjectilePlugin {
                     attach_projectile_sprite,
                     play_shoot_sound,
                     play_impact_sounds,
+                    spawn_projectile_trail,
+                    fade_trail,
                 )
                     .run_if(in_state(GameState::Playing)),
             );
@@ -241,20 +260,28 @@ fn tick_impacts(
 pub(crate) fn try_fire(
     commands: &mut Commands,
     owner: Entity,
+    color: PlayerColor,
     origin: &NetPos,
     facing: &Facing,
     cooldown: &mut FireCooldown,
 ) {
     if cooldown.0.is_finished() {
         cooldown.0.reset();
-        spawn_projectile(commands, owner, origin.0, facing.0);
+        spawn_projectile(commands, owner, color, origin.0, facing.0);
     }
 }
 
-fn spawn_projectile(commands: &mut Commands, owner: Entity, origin: Vec2, direction: Vec2) {
+fn spawn_projectile(
+    commands: &mut Commands,
+    owner: Entity,
+    color: PlayerColor,
+    origin: Vec2,
+    direction: Vec2,
+) {
     commands.spawn((
         Projectile,
         ProjectileOwner(owner),
+        ShotColor(color),
         NetPos(origin),
         Height(INITIAL_HEIGHT),
         ProjectileVelocity {
@@ -272,15 +299,28 @@ fn offline_shoot(
     keys: Res<ButtonInput<KeyCode>>,
     mut commands: Commands,
     mut players: Query<
-        (Entity, &NetPos, &Facing, &mut FireCooldown),
+        (Entity, &NetPos, &Facing, &mut FireCooldown, &PlayerColor),
         (With<Player>, Without<Dead>),
     >,
 ) {
     if !keys.just_pressed(KeyCode::Space) {
         return;
     }
-    for (entity, pos, facing, mut cooldown) in &mut players {
-        try_fire(&mut commands, entity, pos, facing, &mut cooldown);
+    for (entity, pos, facing, mut cooldown, color) in &mut players {
+        try_fire(&mut commands, entity, *color, pos, facing, &mut cooldown);
+    }
+}
+
+/// A bright HDR (linear > 1.0) version of a player's color, so the shot blooms.
+#[cfg(feature = "client")]
+fn shot_glow(color: PlayerColor) -> Color {
+    match color {
+        PlayerColor::Red => Color::linear_rgb(8.0, 1.5, 1.5),
+        PlayerColor::Blue => Color::linear_rgb(1.5, 3.0, 8.0),
+        PlayerColor::Green => Color::linear_rgb(1.5, 7.0, 2.0),
+        PlayerColor::Orange => Color::linear_rgb(8.0, 3.5, 1.0),
+        PlayerColor::Purple => Color::linear_rgb(5.0, 1.5, 8.0),
+        PlayerColor::Yellow => Color::linear_rgb(7.0, 6.0, 1.5),
     }
 }
 
@@ -290,14 +330,14 @@ fn offline_shoot(
 #[allow(clippy::type_complexity)]
 fn attach_projectile_sprite(
     mut commands: Commands,
-    query: Query<(Entity, &NetPos, &Height), (With<Projectile>, Without<Sprite>)>,
+    query: Query<(Entity, &NetPos, &Height, &ShotColor), (With<Projectile>, Without<Sprite>)>,
 ) {
-    for (entity, pos, height) in &query {
+    for (entity, pos, height, color) in &query {
         commands
             .entity(entity)
             .insert((
                 Sprite {
-                    color: PROJECTILE_COLOR,
+                    color: shot_glow(color.0),
                     custom_size: Some(Vec2::splat(PROJECTILE_SIZE)),
                     ..default()
                 },
@@ -384,5 +424,51 @@ fn play_impact_sounds(
             ImpactKind::Object => HIT_OBJECT_SOUND,
         };
         play_sound(&mut commands, &asset_server, path);
+    }
+}
+
+/// Drops a glowing trail segment at each shot's current position every frame.
+/// Segments are independent entities, so they linger in place to form the tail.
+#[cfg(feature = "client")]
+fn spawn_projectile_trail(
+    mut commands: Commands,
+    projectiles: Query<(&NetPos, &Height, &ShotColor), With<Projectile>>,
+) {
+    for (pos, height, color) in &projectiles {
+        let glow = shot_glow(color.0);
+        commands.spawn((
+            TrailSegment {
+                timer: Timer::from_seconds(TRAIL_LIFETIME, TimerMode::Once),
+                glow,
+            },
+            Sprite {
+                color: glow,
+                custom_size: Some(Vec2::splat(TRAIL_SIZE)),
+                ..default()
+            },
+            // Just behind the shot (z 19) but still above players/shadow.
+            Transform::from_xyz(pos.0.x, pos.0.y + height.0, 19.0),
+            super::InGame,
+        ));
+    }
+}
+
+/// Fades trail segments out (translucent + smaller) and despawns expired ones.
+/// Fading the alpha keeps the glow color but lowers its rendered brightness, so
+/// the tail tapers off without leaving dark squares.
+#[cfg(feature = "client")]
+fn fade_trail(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut segments: Query<(Entity, &mut TrailSegment, &mut Sprite)>,
+) {
+    for (entity, mut segment, mut sprite) in &mut segments {
+        if segment.timer.tick(time.delta()).just_finished() {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        let f = 1.0 - segment.timer.fraction();
+        sprite.color = segment.glow.with_alpha(f);
+        sprite.custom_size = Some(Vec2::splat(TRAIL_SIZE * f));
     }
 }
