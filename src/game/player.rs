@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use super::combat::Dead;
 #[cfg(feature = "client")]
 use super::combat::Health;
+#[cfg(feature = "client")]
+use super::enemy::Enemy;
 use super::map::{ArenaBounds, CurrentMap};
 use super::net::{NetPos, is_authoritative, is_offline};
 use super::state::GameState;
@@ -221,17 +223,24 @@ fn attach_player_sprite(
     }
 }
 
-/// Spawns staged crack overlays as children of any player that has replicated
-/// health but no cracks yet. The overlays are hidden by default and revealed by
-/// [`update_health_cracks`].
+/// Spawns staged crack overlays as children of any player or enemy that has
+/// replicated health but no cracks yet. The overlays are hidden by default and
+/// revealed by [`update_health_cracks`].
 #[cfg(feature = "client")]
 #[allow(clippy::type_complexity)]
 fn attach_health_cracks(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
-    players: Query<Entity, (With<Player>, With<Health>, Without<HasHealthCracks>)>,
+    actors: Query<
+        Entity,
+        (
+            Or<(With<Player>, With<Enemy>)>,
+            With<Health>,
+            Without<HasHealthCracks>,
+        ),
+    >,
 ) {
-    for entity in &players {
+    for entity in &actors {
         let mut children = Vec::with_capacity(CRACK_STAGES.len());
         for (i, (path, _)) in CRACK_STAGES.iter().enumerate() {
             let stage = (i + 1) as u8;
@@ -257,14 +266,16 @@ fn attach_health_cracks(
     }
 }
 
-/// Reveals crack stages as health drops. Stages are coarse, so players see
-/// damage buildup without reading exact HP. Dead players hide all cracks.
+/// Reveals crack stages as health drops. Stages are coarse, so players and
+/// enemies see damage buildup without reading exact HP. Dead actors hide all
+/// cracks.
 #[cfg(feature = "client")]
+#[allow(clippy::type_complexity)]
 fn update_health_cracks(
-    players: Query<(&Health, &Children, Has<Dead>), With<Player>>,
+    actors: Query<(&Health, &Children, Has<Dead>), Or<(With<Player>, With<Enemy>)>>,
     mut cracks: Query<(&HealthCrack, &mut Visibility)>,
 ) {
-    for (health, children, dead) in &players {
+    for (health, children, dead) in &actors {
         for child in children {
             if let Ok((crack, mut visibility)) = cracks.get_mut(*child) {
                 let threshold = CRACK_STAGES[crack.0 as usize - 1].1;

@@ -14,6 +14,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use super::enemy::{Enemy, EnemyIntent};
 use super::map::{ArenaBounds, CurrentMap};
 use super::net::{NetPos, is_authoritative};
 use super::player::{Player, PlayerColor, PlayerIntent};
@@ -143,7 +144,7 @@ impl Plugin for ProjectilePlugin {
         app.add_systems(
             Update,
             (
-                ensure_player_shooting_components,
+                ensure_shooting_components,
                 update_facing,
                 tick_cooldowns,
                 simulate_projectiles,
@@ -176,13 +177,15 @@ impl Plugin for ProjectilePlugin {
     }
 }
 
-/// Gives authoritative players their shooting components (idempotent, so it
-/// covers both the offline local player and server-spawned players).
-fn ensure_player_shooting_components(
+/// Gives authoritative players and enemies their shooting components
+/// (idempotent, so it covers offline spawns, server-spawned players, and
+/// replicated-in enemies).
+#[allow(clippy::type_complexity)]
+pub(crate) fn ensure_shooting_components(
     mut commands: Commands,
-    players: Query<Entity, (With<Player>, Without<FireCooldown>)>,
+    entities: Query<Entity, (Or<(With<Player>, With<Enemy>)>, Without<FireCooldown>)>,
 ) {
-    for entity in &players {
+    for entity in &entities {
         let mut timer = Timer::from_seconds(FIRE_COOLDOWN, TimerMode::Once);
         // Start "ready" so the first shot fires immediately.
         timer.finish();
@@ -192,16 +195,28 @@ fn ensure_player_shooting_components(
     }
 }
 
-/// Tracks each player's last-moved direction as their firing direction.
-fn update_facing(mut query: Query<(&PlayerIntent, &mut Facing)>) {
-    for (intent, mut facing) in &mut query {
+/// Tracks each player's last-moved direction and each enemy's current intent
+/// as their firing direction.
+#[allow(clippy::type_complexity)]
+fn update_facing(
+    mut actors: ParamSet<(
+        Query<(&PlayerIntent, &mut Facing), With<Player>>,
+        Query<(&EnemyIntent, &mut Facing), With<Enemy>>,
+    )>,
+) {
+    for (intent, mut facing) in actors.p0() {
+        if intent.0 != Vec2::ZERO {
+            facing.0 = intent.0.normalize_or_zero();
+        }
+    }
+    for (intent, mut facing) in actors.p1() {
         if intent.0 != Vec2::ZERO {
             facing.0 = intent.0.normalize_or_zero();
         }
     }
 }
 
-fn tick_cooldowns(time: Res<Time>, mut query: Query<&mut FireCooldown>) {
+pub(crate) fn tick_cooldowns(time: Res<Time>, mut query: Query<&mut FireCooldown>) {
     for mut cooldown in &mut query {
         cooldown.0.tick(time.delta());
     }

@@ -218,6 +218,76 @@ fn projectile_damages_and_kills_non_owner() {
     );
 }
 
+/// Exercises the authoritative combat loop against an enemy: a player-owned
+/// shot damages an enemy, and the enemy dies and respawns after the delay.
+#[test]
+fn projectile_damages_and_kills_enemy() {
+    use super_battle_royale::game::combat::{CombatPlugin, Dead, Health};
+    use super_battle_royale::game::map::{CurrentMap, TileMap};
+    use super_battle_royale::game::net::NetRole;
+    use super_battle_royale::game::player::Player;
+    use super_battle_royale::game::projectile::{Impact, ImpactKind, Projectile, ProjectileOwner};
+    use super_battle_royale::game::state::GameState;
+
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin));
+    app.init_state::<GameState>();
+    app.insert_resource(NetRole::Server);
+    app.insert_resource(CurrentMap(TileMap::parse("wsw")));
+    // Drive time in fixed steps so the respawn timer is deterministic.
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        std::time::Duration::from_secs_f32(1.0 / 60.0),
+    ));
+
+    let shooter = app.world_mut().spawn((Player, NetPos(Vec2::ZERO))).id();
+    let bot = app.world_mut().spawn((Enemy, NetPos(Vec2::ZERO))).id();
+
+    // First tick gives the enemy full health.
+    app.update();
+    assert_eq!(app.world().get::<Health>(bot).unwrap().current, 100.0);
+
+    // Each shot owned by the player deals 25 damage to the enemy.
+    for expected in [75.0, 50.0, 25.0] {
+        app.world_mut()
+            .spawn((Projectile, ProjectileOwner(shooter), NetPos(Vec2::ZERO)));
+        app.update();
+        assert_eq!(app.world().get::<Health>(bot).unwrap().current, expected);
+        assert!(app.world().get::<Dead>(bot).is_none());
+    }
+
+    // The fourth shot drops the enemy to zero and marks it dead.
+    app.world_mut()
+        .spawn((Projectile, ProjectileOwner(shooter), NetPos(Vec2::ZERO)));
+    app.update();
+    assert!(
+        app.world().get::<Dead>(bot).is_some(),
+        "enemy should be Dead at 0 HP"
+    );
+
+    // Hits spawn an "object" impact marker.
+    let mut impacts = app.world_mut().query::<&Impact>();
+    assert!(
+        impacts
+            .iter(app.world())
+            .any(|impact| impact.0 == ImpactKind::Object),
+        "an enemy hit should spawn an Object impact"
+    );
+
+    // Step through the respawn delay; the enemy should come back to life.
+    for _ in 0..240 {
+        app.update();
+    }
+    assert!(
+        app.world().get::<Dead>(bot).is_none(),
+        "enemy should respawn and lose Dead marker"
+    );
+    assert_eq!(
+        app.world().get::<Health>(bot).unwrap().current,
+        100.0,
+        "enemy should respawn with full health"
+    );
+}
+
 /// Builds a headless app with the networking stack and our protocol registered.
 fn build_app() -> App {
     let mut app = App::new();
