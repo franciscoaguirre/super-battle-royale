@@ -19,6 +19,8 @@ pub mod effects;
 pub mod footsteps;
 #[cfg(feature = "client")]
 pub mod lobby;
+#[cfg(feature = "client")]
+pub mod ping;
 
 use bevy::prelude::*;
 
@@ -55,6 +57,7 @@ impl Plugin for GamePlugin {
             footsteps::FootstepsPlugin,
             lobby::LobbyPlugin,
             music::MusicPlugin,
+            ping::PingPlugin,
         ))
         .add_systems(PostUpdate, net::sync_netpos_to_transform);
     }
