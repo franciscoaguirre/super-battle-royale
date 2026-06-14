@@ -2,12 +2,33 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::combat::Dead;
+#[cfg(feature = "client")]
+use super::combat::Health;
 use super::map::{ArenaBounds, CurrentMap};
 use super::net::{NetPos, is_authoritative, is_offline};
 use super::state::GameState;
 
 pub const PLAYER_SIZE: f32 = 32.0;
 const PLAYER_SPEED: f32 = 240.0;
+
+/// Crack overlay sprites and the health threshold at which each stage appears.
+/// Kept coarse (25 HP steps) so health is readable but not exact.
+#[cfg(feature = "client")]
+const CRACK_STAGES: [(&str, f32); 3] = [
+    ("cracks_1.png", 75.0),
+    ("cracks_2.png", 50.0),
+    ("cracks_3.png", 25.0),
+];
+
+/// Marker that a player already has crack-overlay children spawned.
+#[cfg(feature = "client")]
+#[derive(Component)]
+struct HasHealthCracks;
+
+/// Identifies which damage stage a crack-overlay child represents (1-indexed).
+#[cfg(feature = "client")]
+#[derive(Component)]
+struct HealthCrack(u8);
 
 /// Marker for a player avatar. Replicated so clients learn about every player.
 #[derive(Component, Serialize, Deserialize, Debug, Clone, Copy, Default)]
@@ -91,6 +112,8 @@ impl Plugin for PlayerPlugin {
                     .run_if(is_offline)
                     .before(apply_player_intent),
                 attach_player_sprite.run_if(in_state(GameState::Playing)),
+                attach_health_cracks.run_if(in_state(GameState::Playing)),
+                update_health_cracks.run_if(in_state(GameState::Playing)),
             ),
         );
     }
@@ -195,5 +218,62 @@ fn attach_player_sprite(
             Transform::from_xyz(pos.0.x, pos.0.y, 10.0),
             super::InGame,
         ));
+    }
+}
+
+/// Spawns staged crack overlays as children of any player that has replicated
+/// health but no cracks yet. The overlays are hidden by default and revealed by
+/// [`update_health_cracks`].
+#[cfg(feature = "client")]
+#[allow(clippy::type_complexity)]
+fn attach_health_cracks(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    players: Query<Entity, (With<Player>, With<Health>, Without<HasHealthCracks>)>,
+) {
+    for entity in &players {
+        let mut children = Vec::with_capacity(CRACK_STAGES.len());
+        for (i, (path, _)) in CRACK_STAGES.iter().enumerate() {
+            let stage = (i + 1) as u8;
+            let child = commands
+                .spawn((
+                    Sprite {
+                        image: asset_server.load(*path),
+                        custom_size: Some(Vec2::splat(PLAYER_SIZE)),
+                        ..default()
+                    },
+                    Transform::from_xyz(0.0, 0.0, 0.1),
+                    Visibility::Hidden,
+                    HealthCrack(stage),
+                    super::InGame,
+                ))
+                .id();
+            children.push(child);
+        }
+        commands
+            .entity(entity)
+            .add_children(&children)
+            .insert(HasHealthCracks);
+    }
+}
+
+/// Reveals crack stages as health drops. Stages are coarse, so players see
+/// damage buildup without reading exact HP. Dead players hide all cracks.
+#[cfg(feature = "client")]
+fn update_health_cracks(
+    players: Query<(&Health, &Children, Has<Dead>), With<Player>>,
+    mut cracks: Query<(&HealthCrack, &mut Visibility)>,
+) {
+    for (health, children, dead) in &players {
+        for child in children {
+            if let Ok((crack, mut visibility)) = cracks.get_mut(*child) {
+                let threshold = CRACK_STAGES[crack.0 as usize - 1].1;
+                *visibility = if !dead && health.current <= threshold {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden
+                };
+            }
+        }
     }
 }

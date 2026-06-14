@@ -25,8 +25,8 @@ const RESPAWN_DELAY: f32 = 2.0;
 /// A shot hits a player when their centres are within this distance.
 const HIT_RADIUS: f32 = PLAYER_SIZE / 2.0 + PROJECTILE_RADIUS;
 
-/// A player's hit points. Server/sim-only (no HUD yet, so not replicated).
-#[derive(Component, Clone, Copy, Debug)]
+/// A player's hit points. Replicated so every client can show damage cracks.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug)]
 pub struct Health {
     pub current: f32,
     pub max: f32,
