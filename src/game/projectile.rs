@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::map::ArenaBounds;
+use super::map::{ArenaBounds, CurrentMap};
 use super::net::{NetPos, is_authoritative};
 use super::player::{Player, PlayerColor, PlayerIntent};
 use super::state::GameState;
@@ -212,6 +212,7 @@ fn tick_cooldowns(time: Res<Time>, mut query: Query<&mut FireCooldown>) {
 fn simulate_projectiles(
     time: Res<Time>,
     bounds: Res<ArenaBounds>,
+    map: Res<CurrentMap>,
     mut commands: Commands,
     mut query: Query<(Entity, &mut NetPos, &mut Height, &mut ProjectileVelocity), With<Projectile>>,
 ) {
@@ -224,7 +225,8 @@ fn simulate_projectiles(
         let p = pos.0;
         let out_of_bounds =
             p.x < bounds.min.x || p.x > bounds.max.x || p.y < bounds.min.y || p.y > bounds.max.y;
-        if height.0 <= GROUND_LEVEL {
+        let hit_wall = map.0.circle_intersects_wall(p, PROJECTILE_RADIUS);
+        if height.0 <= GROUND_LEVEL || hit_wall {
             spawn_impact(&mut commands, ImpactKind::Ground, pos.0);
             commands.entity(entity).despawn();
         } else if out_of_bounds {

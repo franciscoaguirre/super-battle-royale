@@ -216,9 +216,52 @@ impl TileMap {
         }
     }
 
-    #[cfg(feature = "client")]
     fn is_wall_at(&self, col: i32, row: i32) -> bool {
         self.tile_at(col, row).is_wall()
+    }
+
+    /// Converts a world-space position into the grid cell that contains it.
+    fn world_to_cell(&self, pos: Vec2) -> (i32, i32) {
+        let size = self.world_size();
+        let col = ((pos.x + size.x / 2.0) / TILE_SIZE).floor() as i32;
+        let row = ((size.y / 2.0 - pos.y) / TILE_SIZE).floor() as i32;
+        (col, row)
+    }
+
+    /// Grid column/row range that could intersect a circle at `pos` with `radius`.
+    fn cell_indices_near(&self, pos: Vec2, radius: f32) -> (i32, i32, i32, i32) {
+        let (center_col, center_row) = self.world_to_cell(pos);
+        let extra = (radius / TILE_SIZE).ceil() as i32 + 1;
+        (
+            (center_col - extra).max(0),
+            (center_row - extra).max(0),
+            (center_col + extra).min(self.width.saturating_sub(1) as i32),
+            (center_row + extra).min(self.height.saturating_sub(1) as i32),
+        )
+    }
+
+    /// Whether a circle at `center` with `radius` overlaps any wall tile.
+    pub fn circle_intersects_wall(&self, center: Vec2, radius: f32) -> bool {
+        if self.width == 0 || self.height == 0 {
+            return false;
+        }
+        let half = TILE_SIZE / 2.0;
+        let (min_col, min_row, max_col, max_row) = self.cell_indices_near(center, radius + half);
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                if self.tile_at(col, row) == Tile::Wall {
+                    let cell_center = self.cell_center(col as usize, row as usize);
+                    let closest = Vec2::new(
+                        center.x.clamp(cell_center.x - half, cell_center.x + half),
+                        center.y.clamp(cell_center.y - half, cell_center.y + half),
+                    );
+                    if closest.distance_squared(center) < radius * radius {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Picks the wall sprite for cell `(col, row)` from its four orthogonal
@@ -413,5 +456,18 @@ mod tests {
         assert_eq!(Song::from_name("Sinister"), Some(Song::Sinister));
         assert_eq!(Song::from_name("  funky "), Some(Song::Funky));
         assert_eq!(Song::from_name("does-not-exist"), None);
+    }
+
+    #[test]
+    fn circle_intersects_wall_detects_nearby_walls() {
+        let map = TileMap::parse("wwww\nwxxw\nwxxw\nwwww");
+        let inside = map.cell_center(1, 1);
+        assert!(!map.circle_intersects_wall(inside, 10.0));
+
+        let against_right_wall = inside + Vec2::new(TILE_SIZE * 1.5, 0.0);
+        assert!(map.circle_intersects_wall(against_right_wall, 10.0));
+
+        let against_bottom_wall = inside - Vec2::new(0.0, TILE_SIZE * 1.5);
+        assert!(map.circle_intersects_wall(against_bottom_wall, 10.0));
     }
 }
