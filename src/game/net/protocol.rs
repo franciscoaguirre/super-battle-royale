@@ -36,3 +36,34 @@ pub struct PlayerInput {
 /// a discrete action we don't want to drop.
 #[derive(Event, Serialize, Deserialize, Clone, Copy, Debug, Default)]
 pub struct ShootRequest;
+
+/// Marks the player entity belonging to the game's owner: the first client to
+/// join (or the local player when offline). Replicated so the server stays the
+/// authority on who may start the match; clients learn they are the owner through
+/// the [`YouAreOwner`] event instead, since Replicon does not tag a client's own
+/// entity.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
+pub struct Owner;
+
+/// Replicated singleton spawned by the authoritative side when the match starts.
+/// Its presence is the "match has begun" signal for online clients, and its
+/// `map_index` tells them which map to load locally (the map itself is never
+/// replicated). Must not carry `InGame`, or it would be despawned on the
+/// `Playing → Lobby`-style cleanup.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
+pub struct MatchInfo {
+    pub map_index: u8,
+}
+
+/// Sent by the owner's client to ask the server to start the match with the
+/// chosen map and bot count. The server validates that the sender owns [`Owner`].
+#[derive(Event, Serialize, Deserialize, Clone, Copy, Debug, Default)]
+pub struct StartMatch {
+    pub map_index: u8,
+    pub bot_count: u8,
+}
+
+/// Sent by the server to a single client right after it joins as the owner, so
+/// the client knows to show the lobby's configuration controls and Start button.
+#[derive(Event, Serialize, Deserialize, Clone, Copy, Debug, Default)]
+pub struct YouAreOwner;

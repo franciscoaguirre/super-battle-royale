@@ -15,16 +15,23 @@ use bevy_replicon_renet::{
     renet::ConnectionConfig,
 };
 
-use super::{PROTOCOL_ID, PlayerInput, ShootRequest, register_protocol};
+use super::{PlayerInput, ShootRequest, protocol_id_for, register_protocol};
 use crate::game::player::input_direction;
+use crate::game::state::GameState;
 
 /// The server endpoint this client should connect to.
 #[derive(Resource, Clone, Copy)]
 struct ServerEndpoint(SocketAddr);
 
+/// The netcode protocol id derived from the join code; must match the server's.
+#[derive(Resource, Clone, Copy)]
+struct ClientProtocolId(u64);
+
 /// Connects the windowed game to a dedicated server.
 pub struct ClientNetPlugin {
     pub server_addr: SocketAddr,
+    /// Join code supplied by the player; gates connection via the protocol id.
+    pub join_code: String,
 }
 
 impl Plugin for ClientNetPlugin {
@@ -32,11 +39,14 @@ impl Plugin for ClientNetPlugin {
         app.add_plugins((RepliconPlugins, RepliconRenetPlugins));
         register_protocol(app);
         app.insert_resource(ServerEndpoint(self.server_addr))
+            .insert_resource(ClientProtocolId(protocol_id_for(&self.join_code)))
             .add_systems(Startup, setup_client)
-            // Only send input once the connection is established.
+            // Only send input once connected and the match is actually underway.
             .add_systems(
                 Update,
-                (send_input, send_shoot_request).run_if(in_state(ClientState::Connected)),
+                (send_input, send_shoot_request)
+                    .run_if(in_state(ClientState::Connected))
+                    .run_if(in_state(GameState::Playing)),
             );
     }
 }
@@ -46,6 +56,7 @@ fn setup_client(
     mut commands: Commands,
     channels: Res<RepliconChannels>,
     endpoint: Res<ServerEndpoint>,
+    protocol: Res<ClientProtocolId>,
 ) -> Result<()> {
     let client = RenetClient::new(ConnectionConfig {
         server_channels_config: channels.server_configs(),
@@ -60,7 +71,7 @@ fn setup_client(
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     let authentication = ClientAuthentication::Unsecure {
         client_id,
-        protocol_id: PROTOCOL_ID,
+        protocol_id: protocol.0,
         server_addr: endpoint.0,
         user_data: None,
     };

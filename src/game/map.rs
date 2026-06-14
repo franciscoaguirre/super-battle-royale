@@ -17,8 +17,15 @@ use super::state::GameState;
 /// Side length, in world units, of a single map tile. All tile art is 64x64.
 pub const TILE_SIZE: f32 = 64.0;
 
-/// Path to the map that is loaded at startup, relative to the working directory.
-const MAP_PATH: &str = "assets/maps/arena.txt";
+/// The maps the owner can choose from in the lobby, as `(display name, path)`.
+/// The selected index is replicated to clients (via `MatchInfo`), and both sides
+/// load the same file deterministically — the map geometry itself is never sent.
+/// Paths are relative to the working directory.
+pub const MAPS: &[(&str, &str)] = &[
+    ("Arena", "assets/maps/arena.txt"),
+    ("Cross", "assets/maps/cross.txt"),
+    ("Pillars", "assets/maps/pillars.txt"),
+];
 
 /// Built-in fallback used when [`MAP_PATH`] cannot be read, so the game always
 /// runs even if the file is missing. Keep it in sync with `assets/maps/arena.txt`.
@@ -349,29 +356,40 @@ pub struct MapObject;
 pub struct MapPlugin;
 
 impl Plugin for MapPlugin {
-    fn build(&self, app: &mut App) {
-        let map = load_map();
-        let bounds = map.bounds();
-
-        // Both client and server load the same map deterministically, so only
-        // these resources are shared; the map geometry never needs replicating.
-        app.insert_resource(bounds).insert_resource(CurrentMap(map));
+    fn build(&self, _app: &mut App) {
+        // The map (and its derived `ArenaBounds`) is no longer loaded at startup:
+        // the owner picks it in the lobby, so loading happens when the match
+        // starts via [`insert_map_resources`] (called by the lobby/server start
+        // flow, before transitioning to `Playing`).
 
         // Floor/wall sprites are rendered only on the client.
         #[cfg(feature = "client")]
-        app.add_systems(OnEnter(GameState::Playing), spawn_map);
+        _app.add_systems(OnEnter(GameState::Playing), spawn_map);
     }
 }
 
-/// Reads the map from disk, falling back to the embedded default if unavailable.
-fn load_map() -> TileMap {
-    match std::fs::read_to_string(MAP_PATH) {
+/// Reads the map at `index` (into [`MAPS`], wrapping) from disk, falling back to
+/// the embedded default if it cannot be read so the game always runs.
+pub fn load_map_by_index(index: u8) -> TileMap {
+    let (_, path) = MAPS[index as usize % MAPS.len()];
+    match std::fs::read_to_string(path) {
         Ok(text) => TileMap::parse(&text),
         Err(err) => {
-            warn!("could not read map `{MAP_PATH}` ({err}); using built-in default");
+            warn!("could not read map `{path}` ({err}); using built-in default");
             TileMap::parse(DEFAULT_MAP)
         }
     }
+}
+
+/// Loads the map at `index` and inserts both the [`CurrentMap`] and its derived
+/// [`ArenaBounds`]. Call this **before** transitioning to `GameState::Playing`,
+/// since the `OnEnter(Playing)` spawn systems (map, camera, player, bots) read
+/// these resources. Used identically by the server, the offline lobby, and the
+/// online client (on receiving `MatchInfo`).
+pub fn insert_map_resources(commands: &mut Commands, index: u8) {
+    let map = load_map_by_index(index);
+    commands.insert_resource(map.bounds());
+    commands.insert_resource(CurrentMap(map));
 }
 
 #[cfg(feature = "client")]

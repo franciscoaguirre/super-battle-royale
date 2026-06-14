@@ -1,0 +1,20 @@
+# Super Battle Royale - pillars map
+#
+# A larger, open field studded with a regular grid of single-tile pillars, with
+# spawns on the top, bottom and centre. See arena.txt for the full legend.
+
+song: sinister
+
+wwwwwwwwwwwwwwwwww
+wsxxxxxxxxxxxxxxsw
+wxxxxxxxxxxxxxxxxw
+wxxwxxwxxwxxwxxwxw
+wxxxxxxxx12xxxxxxw
+wxxwxxwxxwxxwxxwxw
+wxxxxxxxxssxxxxxxw
+wxxwxxwxxwxxwxxwxw
+wxxxxxxxx21xxxxxxw
+wxxwxxwxxwxxwxxwxw
+wxxxxxxxxxxxxxxxxw
+wsxxxxxxxxxxxxxxsw
+wwwwwwwwwwwwwwwwww

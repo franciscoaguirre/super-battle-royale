@@ -7,7 +7,7 @@ use super::map::{ArenaBounds, CurrentMap};
 use super::net::{NetPos, is_authoritative};
 use super::player::PlayerColor;
 use super::projectile::{Facing, FireCooldown, tick_cooldowns, try_fire};
-use super::state::GameState;
+use super::state::{GameState, MatchConfig};
 
 pub const BOT_SIZE: f32 = 32.0;
 const BOT_SPEED: f32 = 180.0;
@@ -65,9 +65,9 @@ impl Plugin for BotPlugin {
 
 /// Spawns the authoritative bot entities. `Replicated` is inert offline (no
 /// server running) and drives replication on the dedicated server.
-fn spawn_bots(mut commands: Commands, map: Res<CurrentMap>) {
+fn spawn_bots(mut commands: Commands, map: Res<CurrentMap>, config: Res<MatchConfig>) {
     let spawns = map.0.spawn_points();
-    let count = 3;
+    let count = config.bot_count as usize;
 
     for i in 0..count {
         let pos = if spawns.is_empty() {

@@ -15,11 +15,15 @@ use bevy_replicon_renet::{
     renet::ConnectionConfig,
 };
 
-use super::{NetPos, PROTOCOL_ID, PlayerInput, ShootRequest, register_protocol};
+use super::{
+    MatchInfo, NetPos, Owner, PlayerInput, ShootRequest, StartMatch, YouAreOwner, is_server,
+    protocol_id_for, register_protocol,
+};
 use crate::game::combat::Dead;
-use crate::game::map::CurrentMap;
+use crate::game::map::{self, CurrentMap};
 use crate::game::player::{Player, PlayerColor, PlayerIntent};
 use crate::game::projectile::{Facing, FireCooldown, try_fire};
+use crate::game::state::{GameState, MatchConfig};
 
 /// Maximum simultaneous players.
 const MAX_CLIENTS: usize = 64;
@@ -28,9 +32,17 @@ const MAX_CLIENTS: usize = 64;
 #[derive(Resource, Clone, Copy)]
 struct BindAddr(SocketAddr);
 
+/// The netcode protocol id derived from the server's join code. Clients must
+/// supply the same code to compute a matching id and be allowed to connect.
+#[derive(Resource, Clone, Copy)]
+struct ServerProtocolId(u64);
+
 /// Runs the headless authoritative server.
 pub struct ServerNetPlugin {
     pub bind_addr: SocketAddr,
+    /// Join code (from the `JOIN_CODE` env var); gates connection via the
+    /// protocol id. Empty means an open server.
+    pub join_code: String,
 }
 
 impl Plugin for ServerNetPlugin {
@@ -38,9 +50,16 @@ impl Plugin for ServerNetPlugin {
         app.add_plugins((RepliconPlugins, RepliconRenetPlugins));
         register_protocol(app);
         app.insert_resource(BindAddr(self.bind_addr))
+            .insert_resource(ServerProtocolId(protocol_id_for(&self.join_code)))
             .add_systems(Startup, setup_server)
+            // Place lobby-joined players at spawn points once the map is known.
+            .add_systems(
+                OnEnter(GameState::Playing),
+                position_players.run_if(is_server),
+            )
             // A client is `AuthorizedClient` once its protocol hash matches ours.
             .add_observer(on_client_authorized)
+            .add_observer(on_start_match)
             .add_observer(receive_input)
             .add_observer(receive_shoot);
     }
@@ -51,6 +70,7 @@ fn setup_server(
     mut commands: Commands,
     channels: Res<RepliconChannels>,
     bind: Res<BindAddr>,
+    protocol: Res<ServerProtocolId>,
 ) -> Result<()> {
     let server = RenetServer::new(ConnectionConfig {
         server_channels_config: channels.server_configs(),
@@ -63,7 +83,7 @@ fn setup_server(
     let server_config = ServerConfig {
         current_time,
         max_clients: MAX_CLIENTS,
-        protocol_id: PROTOCOL_ID,
+        protocol_id: protocol.0,
         authentication: ServerAuthentication::Unsecure,
         public_addresses: Default::default(),
     };
@@ -80,31 +100,90 @@ fn setup_server(
 /// Because the player components live on the client entity itself, the renet
 /// backend despawns them automatically when the client disconnects, propagating
 /// the removal to every other client.
+///
+/// The position is left at the origin here and assigned by [`position_players`]
+/// when the match starts, since the map (and thus its spawn points) isn't chosen
+/// until the owner starts the match. The first client to join is tagged [`Owner`]
+/// and told so via a [`YouAreOwner`] event.
 fn on_client_authorized(
     add: On<Add, AuthorizedClient>,
     mut commands: Commands,
-    map: Res<CurrentMap>,
     players: Query<(), With<Player>>,
 ) {
     let index = players.iter().count();
-    let spawns = map.0.spawn_points();
-    let position = if spawns.is_empty() {
-        Vec2::ZERO
-    } else {
-        spawns[index % spawns.len()]
-    };
     let color = PlayerColor::nth(index);
 
     commands.entity(add.entity).insert((
         Player,
         color,
-        NetPos(position),
+        NetPos(Vec2::ZERO),
         PlayerIntent::default(),
         Replicated,
     ));
+
+    let is_owner = index == 0;
+    if is_owner {
+        commands.entity(add.entity).insert(Owner);
+        commands.server_trigger(ToClients {
+            targets: SendTargets::Single(add.entity.into()),
+            message: YouAreOwner,
+        });
+    }
     info!(
-        "player joined as {color:?} at {position:?} (entity {})",
+        "player joined as {color:?}{} (entity {})",
+        if is_owner { " (owner)" } else { "" },
         add.entity
+    );
+}
+
+/// Positions every player at a map spawn point when the match begins. Runs only
+/// on the dedicated server (offline positions its single local player in
+/// `spawn_player`); the map resource is guaranteed present because the start flow
+/// inserts it before transitioning to `Playing`.
+fn position_players(map: Res<CurrentMap>, mut players: Query<&mut NetPos, With<Player>>) {
+    let spawns = map.0.spawn_points();
+    if spawns.is_empty() {
+        return;
+    }
+    for (index, mut pos) in players.iter_mut().enumerate() {
+        pos.0 = spawns[index % spawns.len()];
+    }
+}
+
+/// Starts the match when the owner requests it: validates the sender owns
+/// [`Owner`], records the chosen [`MatchConfig`], loads the map, spawns the
+/// replicated [`MatchInfo`] singleton (the clients' "match started" signal), and
+/// transitions to `Playing`. Inserting the map resources *before* the transition
+/// is required: the `OnEnter(Playing)` spawn systems read them.
+fn on_start_match(
+    req: On<FromClient<StartMatch>>,
+    owners: Query<(), With<Owner>>,
+    started: Query<(), With<MatchInfo>>,
+    mut commands: Commands,
+    mut config: ResMut<MatchConfig>,
+    mut next: ResMut<NextState<GameState>>,
+) {
+    let Some(entity) = req.client_id.entity() else {
+        return;
+    };
+    // Only the owner may start, and only once.
+    if owners.get(entity).is_err() || !started.is_empty() {
+        return;
+    }
+
+    config.map_index = req.map_index;
+    config.bot_count = req.bot_count;
+    map::insert_map_resources(&mut commands, req.map_index);
+    commands.spawn((
+        MatchInfo {
+            map_index: req.map_index,
+        },
+        Replicated,
+    ));
+    next.set(GameState::Playing);
+    info!(
+        "owner started match: map {} with {} bots",
+        req.map_index, req.bot_count
     );
 }
 

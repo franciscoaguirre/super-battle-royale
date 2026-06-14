@@ -1,0 +1,18 @@
+# Super Battle Royale - cross map
+#
+# A solid plus of walls dominates the centre, leaving an open ring around the
+# edge that connects all four corner spawns. See arena.txt for the full legend.
+
+song: rocky
+
+wwwwwwwwwwwwwwww
+wsxxxxxxxxxxxxsw
+wxxxxxxwwxxxxxxw
+wxxxxxxwwxxxxxxw
+wxxxxxxwwxxxxxxw
+wxxwwwwwwwwwwxxw
+wxxxxxxwwxxxxxxw
+wxxxxxxwwxxxxxxw
+wxxxxxxwwxxxxxxw
+wsxxxxxxxxxxxxsw
+wwwwwwwwwwwwwwww

@@ -15,8 +15,12 @@ use super_battle_royale::game::net::{DEFAULT_PORT, NetRole};
 ///   server                  # bind 0.0.0.0:5000
 ///   server <port>           # bind 0.0.0.0:<port>
 ///   server <host:port>      # bind a specific address
+///
+/// Set the `JOIN_CODE` env var to require a matching code from connecting
+/// clients; leave it unset for an open server.
 fn main() {
     let bind_addr = parse_bind_addr();
+    let join_code = std::env::var("JOIN_CODE").unwrap_or_default();
 
     App::new()
         // Headless: a fixed 60 Hz loop with no rendering, audio, or window.
@@ -28,7 +32,10 @@ fn main() {
         .add_plugins((LogPlugin::default(), StatesPlugin))
         .insert_resource(NetRole::Server)
         .add_plugins(GamePlugin)
-        .add_plugins(ServerNetPlugin { bind_addr })
+        .add_plugins(ServerNetPlugin {
+            bind_addr,
+            join_code,
+        })
         .run();
 }
 

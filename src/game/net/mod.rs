@@ -22,7 +22,7 @@ pub mod client;
 #[cfg(feature = "server")]
 pub mod server;
 
-pub use protocol::{NetPos, PlayerInput, ShootRequest};
+pub use protocol::{MatchInfo, NetPos, Owner, PlayerInput, ShootRequest, StartMatch, YouAreOwner};
 
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
@@ -35,10 +35,37 @@ use super::projectile::{Height, Impact, Projectile, ShotColor};
 /// Default UDP port the server listens on and clients connect to.
 pub const DEFAULT_PORT: u16 = 5000;
 
-/// Identifies this game/version on the wire. Renet rejects connections whose
-/// protocol id differs, giving a cheap version check on top of Replicon's
-/// protocol-hash check.
-pub const PROTOCOL_ID: u64 = 0x5342_525f_0001; // "SBR" + version
+/// Base protocol id identifying this game/version on the wire. Renet rejects
+/// connections whose protocol id differs, giving a cheap version check on top of
+/// Replicon's protocol-hash check. The active protocol id is this value XORed
+/// with a hash of the join code (see [`protocol_id_for`]), so clients without the
+/// server's code compute a different id and are refused at the netcode handshake.
+pub const BASE_PROTOCOL_ID: u64 = 0x5342_525f_0001; // "SBR" + version
+
+/// Deterministic FNV-1a hash of `bytes`. Unlike `std`'s `DefaultHasher`, this is
+/// guaranteed to produce identical results in the client and server binaries (and
+/// across runs), which the join-code gate relies on.
+const fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        i += 1;
+    }
+    hash
+}
+
+/// The netcode protocol id for a given join `code`. An empty code yields the bare
+/// [`BASE_PROTOCOL_ID`] (an open server); any non-empty code mixes its hash in, so
+/// only peers that share the exact code agree on the id and can connect.
+pub fn protocol_id_for(code: &str) -> u64 {
+    if code.is_empty() {
+        BASE_PROTOCOL_ID
+    } else {
+        BASE_PROTOCOL_ID ^ fnv1a(code.as_bytes())
+    }
+}
 
 /// Which role this running instance plays. Inserted as a resource before the app
 /// starts so run-conditions can branch on it.
@@ -66,8 +93,12 @@ pub fn register_protocol(app: &mut App) {
         .replicate::<ShotColor>()
         .replicate::<Impact>()
         .replicate::<Dead>()
+        .replicate::<Owner>()
+        .replicate::<MatchInfo>()
         .add_client_event::<PlayerInput>(Channel::Unreliable)
-        .add_client_event::<ShootRequest>(Channel::Ordered);
+        .add_client_event::<ShootRequest>(Channel::Ordered)
+        .add_client_event::<StartMatch>(Channel::Ordered)
+        .add_server_event::<YouAreOwner>(Channel::Ordered);
 }
 
 /// True when this instance owns the simulation: offline single-player or the
@@ -84,6 +115,34 @@ pub fn is_offline(role: Res<NetRole>) -> bool {
 /// True only when connected to a remote server (drives input sending).
 pub fn is_online_client(role: Res<NetRole>) -> bool {
     *role == NetRole::OnlineClient
+}
+
+/// True only on the headless dedicated server. Used to position client-owned
+/// players at match start (offline positions its single player separately).
+pub fn is_server(role: Res<NetRole>) -> bool {
+    *role == NetRole::Server
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BASE_PROTOCOL_ID, protocol_id_for};
+
+    #[test]
+    fn empty_code_yields_the_base_protocol_id() {
+        assert_eq!(protocol_id_for(""), BASE_PROTOCOL_ID);
+    }
+
+    #[test]
+    fn the_same_code_always_yields_the_same_id() {
+        assert_eq!(protocol_id_for("secret"), protocol_id_for("secret"));
+    }
+
+    #[test]
+    fn different_codes_yield_different_ids() {
+        assert_ne!(protocol_id_for("secret"), protocol_id_for("other"));
+        // A real code must differ from the open-server id too.
+        assert_ne!(protocol_id_for("secret"), BASE_PROTOCOL_ID);
+    }
 }
 
 /// Copies the authoritative [`NetPos`] into the render [`Transform`] for every

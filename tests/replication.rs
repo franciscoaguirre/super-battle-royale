@@ -27,7 +27,7 @@ use bevy_replicon_renet::{
 
 use super_battle_royale::game::bot::Bot;
 use super_battle_royale::game::net::{
-    NetPos, PROTOCOL_ID, PlayerInput, ShootRequest, register_protocol,
+    NetPos, PlayerInput, ShootRequest, protocol_id_for, register_protocol,
 };
 use super_battle_royale::game::player::{Player, PlayerColor};
 use super_battle_royale::game::projectile::{Height, Projectile};
@@ -102,6 +102,97 @@ fn replicates_world_and_receives_input() {
     );
 }
 
+/// A client whose join code differs from the server's computes a different
+/// netcode protocol id and must be refused at the handshake, never connecting.
+#[test]
+fn rejects_client_with_wrong_join_code() {
+    let mut server_app = build_app();
+    let mut client_app = build_app();
+
+    let port = setup_server_with_protocol(&mut server_app, protocol_id_for("secret"));
+    setup_client_with_protocol(&mut client_app, port, protocol_id_for("wrong"));
+
+    // Give it as long as a successful connection would get, then assert failure.
+    for _ in 0..1000 {
+        client_app.update();
+        server_app.update();
+    }
+
+    assert!(
+        !client_app.world().resource::<RenetClient>().is_connected(),
+        "a client with the wrong join code must not connect"
+    );
+}
+
+/// Exercises the new lobby protocol end to end: the replicated `Owner` marker
+/// reaches the client, a `StartMatch` client event reaches the server, and the
+/// `MatchInfo` the server spawns in response replicates back with its map index.
+#[test]
+fn replicates_owner_and_match_and_receives_start() {
+    use super_battle_royale::game::net::{MatchInfo, Owner, StartMatch};
+
+    let mut server_app = build_app();
+    let mut client_app = build_app();
+
+    // Server: an owner player, plus "on StartMatch, spawn the MatchInfo" — the
+    // replication-relevant half of the real start flow.
+    server_app.world_mut().spawn((
+        Player,
+        PlayerColor::Blue,
+        Owner,
+        NetPos(PLAYER_POS),
+        Replicated,
+    ));
+    server_app.add_observer(|req: On<FromClient<StartMatch>>, mut commands: Commands| {
+        commands.spawn((
+            MatchInfo {
+                map_index: req.map_index,
+            },
+            Replicated,
+        ));
+    });
+
+    // Client: once connected, request a start with a specific map index.
+    client_app.init_resource::<Sent>();
+    client_app.add_systems(
+        Update,
+        (|mut commands: Commands, mut sent: ResMut<Sent>| {
+            if !sent.0 {
+                commands.client_trigger(StartMatch {
+                    map_index: 2,
+                    bot_count: 5,
+                });
+                sent.0 = true;
+            }
+        })
+        .run_if(in_state(ClientState::Connected)),
+    );
+
+    let port = setup_server(&mut server_app);
+    setup_client(&mut client_app, port);
+    wait_for_connection(&mut server_app, &mut client_app);
+    for _ in 0..100 {
+        client_app.update();
+        server_app.update();
+    }
+
+    // The `Owner` marker replicated onto the player.
+    let mut owners = client_app
+        .world_mut()
+        .query_filtered::<&NetPos, (With<Player>, With<Owner>)>();
+    let owner_pos = owners
+        .single(client_app.world())
+        .expect("client should see exactly one owner player");
+    assert_eq!(owner_pos.0, PLAYER_POS);
+
+    // The server spawned a MatchInfo in response to StartMatch, and it replicated.
+    let mut infos = client_app.world_mut().query::<&MatchInfo>();
+    let info = infos
+        .single(client_app.world())
+        .expect("client should see the replicated match info");
+    assert_eq!(info.map_index, 2);
+}
+
 /// Set to true once the client has sent its one shoot request.
 #[derive(Resource, Default)]
 struct Sent(bool);
@@ -173,7 +264,8 @@ fn projectile_damages_and_kills_non_owner() {
 
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin));
-    app.init_state::<GameState>();
+    // The combat systems run only in `Playing`; start there (the default is now Lobby).
+    app.insert_state(GameState::Playing);
     app.insert_resource(NetRole::Server);
     app.insert_resource(CurrentMap(TileMap::parse("wsw")));
 
@@ -231,7 +323,8 @@ fn projectile_damages_and_kills_bot() {
 
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin));
-    app.init_state::<GameState>();
+    // The combat systems run only in `Playing`; start there (the default is now Lobby).
+    app.insert_state(GameState::Playing);
     app.insert_resource(NetRole::Server);
     app.insert_resource(CurrentMap(TileMap::parse("wsw")));
     // Drive time in fixed steps so the respawn timer is deterministic.
@@ -304,6 +397,12 @@ fn build_app() -> App {
 }
 
 fn setup_server(app: &mut App) -> u16 {
+    setup_server_with_protocol(app, protocol_id_for(""))
+}
+
+/// Like [`setup_server`] but with an explicit protocol id, to exercise the
+/// join-code gate (which folds the code into the protocol id).
+fn setup_server_with_protocol(app: &mut App, protocol_id: u64) -> u16 {
     let channels = app.world().resource::<RepliconChannels>();
     let server = RenetServer::new(ConnectionConfig {
         server_channels_config: channels.server_configs(),
@@ -320,7 +419,7 @@ fn setup_server(app: &mut App) -> u16 {
     let server_config = ServerConfig {
         current_time,
         max_clients: 1,
-        protocol_id: PROTOCOL_ID,
+        protocol_id,
         public_addresses: vec![public_addr],
         authentication: ServerAuthentication::Unsecure,
     };
@@ -331,6 +430,11 @@ fn setup_server(app: &mut App) -> u16 {
 }
 
 fn setup_client(app: &mut App, port: u16) {
+    setup_client_with_protocol(app, port, protocol_id_for(""));
+}
+
+/// Like [`setup_client`] but with an explicit protocol id (see the join-code gate).
+fn setup_client_with_protocol(app: &mut App, port: u16, protocol_id: u64) {
     let channels = app.world().resource::<RepliconChannels>();
     let client = RenetClient::new(ConnectionConfig {
         server_channels_config: channels.server_configs(),
@@ -345,7 +449,7 @@ fn setup_client(app: &mut App, port: u16) {
     let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let authentication = ClientAuthentication::Unsecure {
         client_id: 1,
-        protocol_id: PROTOCOL_ID,
+        protocol_id,
         server_addr,
         user_data: None,
     };
