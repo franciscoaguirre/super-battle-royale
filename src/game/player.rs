@@ -6,7 +6,7 @@ use super::bot::Bot;
 #[cfg(feature = "client")]
 use super::combat::Health;
 use super::combat::{Dead, SpeedBoost};
-use super::map::{ArenaBounds, CurrentMap};
+use super::map::{ArenaBounds, CurrentMap, TileMap};
 use super::net::{NetPos, is_authoritative, is_offline};
 use super::state::GameState;
 
@@ -14,6 +14,11 @@ pub const PLAYER_SIZE: f32 = 32.0;
 const PLAYER_SPEED: f32 = 240.0;
 /// Movement-speed multiplier while a player holds a [`SpeedBoost`] power-up.
 const SPEED_FACTOR: f32 = 1.6;
+
+/// Fixed simulation timestep (seconds). Player movement runs in `FixedUpdate` at
+/// this rate on the authoritative side, and the client predicts/replays with the
+/// exact same `dt`, so client replay reproduces server steps bit-for-bit.
+pub const FIXED_DT: f32 = 1.0 / 60.0;
 
 /// Crack overlay sprites and the health threshold at which each stage appears.
 /// Kept coarse (25 HP steps) so health is readable but not exact.
@@ -98,9 +103,10 @@ impl Plugin for PlayerPlugin {
             // Offline spawns the single local player; online clients receive
             // players via replication, the server via [`on_client_authorized`].
             .add_systems(OnEnter(GameState::Playing), spawn_player.run_if(is_offline))
-            // Movement is applied wherever the simulation is authoritative.
+            // Movement runs on a fixed timestep wherever the simulation is
+            // authoritative, so prediction replay on the client matches it exactly.
             .add_systems(
-                Update,
+                FixedUpdate,
                 apply_player_intent
                     .run_if(in_state(GameState::Playing))
                     .run_if(is_authoritative),
@@ -113,8 +119,7 @@ impl Plugin for PlayerPlugin {
             (
                 read_local_input
                     .run_if(in_state(GameState::Playing))
-                    .run_if(is_offline)
-                    .before(apply_player_intent),
+                    .run_if(is_offline),
                 attach_player_sprite.run_if(in_state(GameState::Playing)),
                 attach_health_cracks.run_if(in_state(GameState::Playing)),
                 update_health_cracks.run_if(in_state(GameState::Playing)),
@@ -136,41 +141,50 @@ fn spawn_player(mut commands: Commands, selected: Res<SelectedColor>, map: Res<C
     ));
 }
 
-/// Advances every player's authoritative position from its intent, sliding
-/// along map walls and clamped to the arena. Runs on the server and in offline
-/// single-player.
-fn apply_player_intent(
-    time: Res<Time>,
+/// Advances a player one fixed step from a movement direction: move `dir`
+/// (clamped to unit length, so a client can't request more than full speed) at
+/// [`PLAYER_SPEED`] for `dt`, sliding along wall tiles one axis at a time, then
+/// clamp to the arena. Pure and deterministic — shared by the authoritative
+/// server step ([`apply_player_intent`]) and the client's prediction replay, so
+/// both compute identical positions.
+pub fn step_player(pos: Vec2, dir: Vec2, dt: f32, map: &TileMap, bounds: &ArenaBounds) -> Vec2 {
+    let half = PLAYER_SIZE / 2.0;
+    let desired = pos + dir.clamp_length_max(1.0) * PLAYER_SPEED * dt;
+
+    let mut next = pos;
+    let candidate_x = Vec2::new(desired.x, next.y);
+    if !map.circle_intersects_wall(candidate_x, half) {
+        next.x = candidate_x.x;
+    }
+    let candidate_y = Vec2::new(next.x, desired.y);
+    if !map.circle_intersects_wall(candidate_y, half) {
+        next.y = candidate_y.y;
+    }
+
+    bounds.clamp(next, half)
+}
+
+/// Advances every player's authoritative position from its intent. Runs in
+/// `FixedUpdate` (fixed [`FIXED_DT`]) on the server and in offline single-player,
+/// so the step is deterministic and matches the client's prediction replay.
+/// `pub(crate)` so the server's `dequeue_inputs` can order itself `.before` it.
+pub(crate) fn apply_player_intent(
     bounds: Res<ArenaBounds>,
     map: Res<CurrentMap>,
     mut query: Query<(&mut NetPos, &PlayerIntent, Option<&SpeedBoost>), Without<Dead>>,
 ) {
-    let half = PLAYER_SIZE / 2.0;
     for (mut pos, intent, boost) in &mut query {
-        // Clamp the magnitude so a client can't request a higher-than-allowed speed.
-        // The clamp is on the *direction*, so a speed power-up still scales it.
-        let dir = intent.0.clamp_length_max(1.0);
-        let speed = if boost.is_some() {
-            PLAYER_SPEED * SPEED_FACTOR
+        // A speed power-up scales the per-tick distance by stretching `dt`; the
+        // dir-clamp inside `step_player` still guards against speed-hacked inputs.
+        let dt = if boost.is_some() {
+            FIXED_DT * SPEED_FACTOR
         } else {
-            PLAYER_SPEED
+            FIXED_DT
         };
-        let desired = pos.0 + dir * speed * time.delta_secs();
-
-        // Slide along walls by resolving movement one axis at a time.
-        let mut next = pos.0;
-        let candidate_x = Vec2::new(desired.x, next.y);
-        if !map.0.circle_intersects_wall(candidate_x, half) {
-            next.x = candidate_x.x;
-        }
-        let candidate_y = Vec2::new(next.x, desired.y);
-        if !map.0.circle_intersects_wall(candidate_y, half) {
-            next.y = candidate_y.y;
-        }
-
+        let next = step_player(pos.0, intent.0, dt, &map.0, &bounds);
         // `set_if_neq` avoids marking the component changed (and re-replicating)
         // when a player is standing still.
-        pos.set_if_neq(NetPos(bounds.clamp(next, half)));
+        pos.set_if_neq(NetPos(next));
     }
 }
 
@@ -294,5 +308,62 @@ fn update_health_cracks(
                 };
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::map::TileMap;
+
+    /// One fixed step covers `PLAYER_SPEED * FIXED_DT` units at full input.
+    const STEP: f32 = PLAYER_SPEED * FIXED_DT;
+
+    #[test]
+    fn step_player_is_deterministic() {
+        let map = TileMap::parse("xxx");
+        let bounds = map.bounds();
+        let a = step_player(Vec2::ZERO, Vec2::new(0.3, -0.7), FIXED_DT, &map, &bounds);
+        let b = step_player(Vec2::ZERO, Vec2::new(0.3, -0.7), FIXED_DT, &map, &bounds);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn step_player_moves_at_full_speed_in_the_open() {
+        let map = TileMap::parse("xxx"); // wall-free
+        let bounds = map.bounds();
+        let next = step_player(Vec2::ZERO, Vec2::X, FIXED_DT, &map, &bounds);
+        assert!(
+            (next.x - STEP).abs() < 1e-3,
+            "x should advance one step, got {next:?}"
+        );
+        assert!(next.y.abs() < 1e-3);
+    }
+
+    #[test]
+    fn step_player_slides_along_a_wall() {
+        // `xwx`: a wall tile spanning world x∈[-32,32]. A player just left of it
+        // (clear at x=-48, where its 16-radius only touches the wall edge) moving
+        // up-and-right should be blocked on x but slide on y.
+        let map = TileMap::parse("xwx");
+        let bounds = map.bounds();
+        let start = Vec2::new(-48.0, 0.0);
+        let next = step_player(start, Vec2::new(1.0, 1.0), FIXED_DT, &map, &bounds);
+        assert!(
+            (next.x - start.x).abs() < 1e-3,
+            "x should be blocked by the wall"
+        );
+        assert!(next.y > 1.0, "y should slide past the wall, got {next:?}");
+    }
+
+    #[test]
+    fn step_player_clamps_to_arena_bounds() {
+        let map = TileMap::parse("xxxxx"); // bounds x∈[-160,160]; usable edge 160-16=144
+        let bounds = map.bounds();
+        let next = step_player(Vec2::new(143.0, 0.0), Vec2::X, FIXED_DT, &map, &bounds);
+        assert!(
+            (next.x - 144.0).abs() < 1e-3,
+            "should clamp to arena edge, got {next:?}"
+        );
     }
 }

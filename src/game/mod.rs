@@ -41,6 +41,9 @@ impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         app.init_state::<GameState>()
             .init_resource::<MatchConfig>()
+            // Run the fixed simulation step (player movement + prediction) at the
+            // server's 60 Hz loop rate, so client replay matches server steps.
+            .insert_resource(Time::<Fixed>::from_hz(60.0))
             .add_plugins((
                 combat::CombatPlugin,
                 bot::BotPlugin,
