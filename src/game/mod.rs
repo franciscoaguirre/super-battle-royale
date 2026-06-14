@@ -1,5 +1,5 @@
+pub mod bot;
 pub mod combat;
-pub mod enemy;
 pub mod map;
 pub mod music;
 pub mod net;
@@ -24,7 +24,7 @@ use state::GameState;
 
 /// Top-level plugin that wires up the entire game.
 ///
-/// This is shared by both binaries. Simulation plugins (`enemy`, `map`,
+/// This is shared by both binaries. Simulation plugins (`bot`, `map`,
 /// `player`) compile everywhere; the simulation runs only where this instance is
 /// authoritative (see [`net::is_authoritative`]). Rendering/audio plugins are
 /// added only in the client build. The networking transport itself
@@ -37,7 +37,7 @@ impl Plugin for GamePlugin {
         app.init_state::<GameState>()
             .add_plugins((
                 combat::CombatPlugin,
-                enemy::EnemyPlugin,
+                bot::BotPlugin,
                 map::MapPlugin,
                 player::PlayerPlugin,
                 projectile::ProjectilePlugin,

@@ -2,7 +2,7 @@
 //!
 //! Runs a server `App` and a client `App` in one process (no rendering), connects
 //! them over a real loopback UDP socket, and asserts that the registered protocol
-//! replicates players and enemies to the client and that client input reaches the
+//! replicates players and bots to the client and that client input reaches the
 //! server. Requires both networking sides, so run with:
 //!
 //! ```bash
@@ -25,7 +25,7 @@ use bevy_replicon_renet::{
     renet::ConnectionConfig,
 };
 
-use super_battle_royale::game::enemy::Enemy;
+use super_battle_royale::game::bot::Bot;
 use super_battle_royale::game::net::{
     NetPos, PROTOCOL_ID, PlayerInput, ShootRequest, register_protocol,
 };
@@ -33,7 +33,7 @@ use super_battle_royale::game::player::{Player, PlayerColor};
 use super_battle_royale::game::projectile::{Height, Projectile};
 
 const PLAYER_POS: Vec2 = Vec2::new(12.0, -34.0);
-const ENEMY_POS: Vec2 = Vec2::new(-5.0, 7.0);
+const BOT_POS: Vec2 = Vec2::new(-5.0, 7.0);
 const TEST_INPUT: Vec2 = Vec2::new(1.0, 0.0);
 
 /// Records the most recent input the server received from a client.
@@ -57,7 +57,7 @@ fn replicates_world_and_receives_input() {
         .spawn((Player, PlayerColor::Red, NetPos(PLAYER_POS), Replicated));
     server_app
         .world_mut()
-        .spawn((Enemy, NetPos(ENEMY_POS), Replicated));
+        .spawn((Bot, NetPos(BOT_POS), Replicated));
 
     // Client side: stream a fixed input once connected.
     client_app.add_systems(
@@ -85,14 +85,14 @@ fn replicates_world_and_receives_input() {
     assert_eq!(*color, PlayerColor::Red);
     assert_eq!(pos.0, PLAYER_POS);
 
-    // The enemy replicated with its exact position.
-    let mut enemies = client_app
+    // The bot replicated with its exact position.
+    let mut bots = client_app
         .world_mut()
-        .query_filtered::<&NetPos, With<Enemy>>();
-    let enemy_pos = enemies
+        .query_filtered::<&NetPos, With<Bot>>();
+    let bot_pos = bots
         .single(client_app.world())
-        .expect("client should see exactly one enemy");
-    assert_eq!(enemy_pos.0, ENEMY_POS);
+        .expect("client should see exactly one bot");
+    assert_eq!(bot_pos.0, BOT_POS);
 
     // The client's input reached the server.
     assert_eq!(
@@ -215,6 +215,76 @@ fn projectile_damages_and_kills_non_owner() {
             .iter(app.world())
             .any(|impact| impact.0 == ImpactKind::Object),
         "a player hit should spawn an Object impact"
+    );
+}
+
+/// Exercises the authoritative combat loop against an bot: a player-owned
+/// shot damages an bot, and the bot dies and respawns after the delay.
+#[test]
+fn projectile_damages_and_kills_bot() {
+    use super_battle_royale::game::combat::{CombatPlugin, Dead, Health};
+    use super_battle_royale::game::map::{CurrentMap, TileMap};
+    use super_battle_royale::game::net::NetRole;
+    use super_battle_royale::game::player::Player;
+    use super_battle_royale::game::projectile::{Impact, ImpactKind, Projectile, ProjectileOwner};
+    use super_battle_royale::game::state::GameState;
+
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin));
+    app.init_state::<GameState>();
+    app.insert_resource(NetRole::Server);
+    app.insert_resource(CurrentMap(TileMap::parse("wsw")));
+    // Drive time in fixed steps so the respawn timer is deterministic.
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        std::time::Duration::from_secs_f32(1.0 / 60.0),
+    ));
+
+    let shooter = app.world_mut().spawn((Player, NetPos(Vec2::ZERO))).id();
+    let bot = app.world_mut().spawn((Bot, NetPos(Vec2::ZERO))).id();
+
+    // First tick gives the bot full health.
+    app.update();
+    assert_eq!(app.world().get::<Health>(bot).unwrap().current, 100.0);
+
+    // Each shot owned by the player deals 25 damage to the bot.
+    for expected in [75.0, 50.0, 25.0] {
+        app.world_mut()
+            .spawn((Projectile, ProjectileOwner(shooter), NetPos(Vec2::ZERO)));
+        app.update();
+        assert_eq!(app.world().get::<Health>(bot).unwrap().current, expected);
+        assert!(app.world().get::<Dead>(bot).is_none());
+    }
+
+    // The fourth shot drops the bot to zero and marks it dead.
+    app.world_mut()
+        .spawn((Projectile, ProjectileOwner(shooter), NetPos(Vec2::ZERO)));
+    app.update();
+    assert!(
+        app.world().get::<Dead>(bot).is_some(),
+        "bot should be Dead at 0 HP"
+    );
+
+    // Hits spawn an "object" impact marker.
+    let mut impacts = app.world_mut().query::<&Impact>();
+    assert!(
+        impacts
+            .iter(app.world())
+            .any(|impact| impact.0 == ImpactKind::Object),
+        "an bot hit should spawn an Object impact"
+    );
+
+    // Step through the respawn delay; the bot should come back to life.
+    for _ in 0..240 {
+        app.update();
+    }
+    assert!(
+        app.world().get::<Dead>(bot).is_none(),
+        "bot should respawn and lose Dead marker"
+    );
+    assert_eq!(
+        app.world().get::<Health>(bot).unwrap().current,
+        100.0,
+        "bot should respawn with full health"
     );
 }
 
