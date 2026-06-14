@@ -3,6 +3,7 @@ pub mod combat;
 pub mod map;
 pub mod music;
 pub mod net;
+pub mod pickup;
 pub mod player;
 pub mod projectile;
 pub mod state;
@@ -44,6 +45,7 @@ impl Plugin for GamePlugin {
                 combat::CombatPlugin,
                 bot::BotPlugin,
                 map::MapPlugin,
+                pickup::PickupPlugin,
                 player::PlayerPlugin,
                 projectile::ProjectilePlugin,
             ))

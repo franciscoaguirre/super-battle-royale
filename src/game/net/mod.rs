@@ -29,6 +29,7 @@ use bevy_replicon::prelude::*;
 
 use super::bot::Bot;
 use super::combat::{Dead, Health};
+use super::pickup::PickupKind;
 use super::player::{Player, PlayerColor};
 use super::projectile::{Height, Impact, Projectile, ShotColor};
 
@@ -95,6 +96,7 @@ pub fn register_protocol(app: &mut App) {
         .replicate::<Dead>()
         .replicate::<Owner>()
         .replicate::<MatchInfo>()
+        .replicate::<PickupKind>()
         .add_client_event::<PlayerInput>(Channel::Unreliable)
         .add_client_event::<ShootRequest>(Channel::Ordered)
         .add_client_event::<StartMatch>(Channel::Ordered)

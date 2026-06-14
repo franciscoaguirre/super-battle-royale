@@ -6,7 +6,7 @@ use super::combat::Dead;
 use super::map::{ArenaBounds, CurrentMap};
 use super::net::{NetPos, is_authoritative};
 use super::player::PlayerColor;
-use super::projectile::{Facing, FireCooldown, tick_cooldowns, try_fire};
+use super::projectile::{Facing, FireCooldown, ShotMods, tick_cooldowns, try_fire};
 use super::state::{GameState, MatchConfig};
 
 pub const BOT_SIZE: f32 = 32.0;
@@ -231,7 +231,16 @@ fn bot_shoot(
             continue;
         }
 
-        try_fire(&mut commands, entity, *color, pos, facing, &mut cooldown);
+        // Bots don't collect power-ups in v1, so they always fire a single shot.
+        try_fire(
+            &mut commands,
+            entity,
+            *color,
+            pos,
+            facing,
+            &mut cooldown,
+            ShotMods::single(),
+        );
     }
 }
 

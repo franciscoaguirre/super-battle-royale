@@ -19,10 +19,10 @@ use super::{
     MatchInfo, NetPos, Owner, PlayerInput, ShootRequest, StartMatch, YouAreOwner, is_server,
     protocol_id_for, register_protocol,
 };
-use crate::game::combat::Dead;
+use crate::game::combat::{Dead, DoubleShot, QuadShot, Zigzag};
 use crate::game::map::{self, CurrentMap};
 use crate::game::player::{Player, PlayerColor, PlayerIntent};
-use crate::game::projectile::{Facing, FireCooldown, try_fire};
+use crate::game::projectile::{Facing, FireCooldown, ShotMods, try_fire};
 use crate::game::state::{GameState, MatchConfig};
 
 /// Maximum simultaneous players.
@@ -198,14 +198,36 @@ fn receive_input(input: On<FromClient<PlayerInput>>, mut players: Query<&mut Pla
 
 /// Fires a shot for the sending client's player, in its tracked facing.
 /// Dead players (awaiting respawn) can't shoot.
+#[allow(clippy::type_complexity)]
 fn receive_shoot(
     request: On<FromClient<ShootRequest>>,
     mut commands: Commands,
-    mut players: Query<(&NetPos, &Facing, &mut FireCooldown, &PlayerColor), Without<Dead>>,
+    mut players: Query<
+        (
+            &NetPos,
+            &Facing,
+            &mut FireCooldown,
+            &PlayerColor,
+            Option<&DoubleShot>,
+            Option<&QuadShot>,
+            Option<&Zigzag>,
+        ),
+        Without<Dead>,
+    >,
 ) {
     if let Some(entity) = request.client_id.entity()
-        && let Ok((pos, facing, mut cooldown, color)) = players.get_mut(entity)
+        && let Ok((pos, facing, mut cooldown, color, double, quad, zigzag)) =
+            players.get_mut(entity)
     {
-        try_fire(&mut commands, entity, *color, pos, facing, &mut cooldown);
+        let mods = ShotMods::from_buffs(double.is_some(), quad.is_some(), zigzag.is_some());
+        try_fire(
+            &mut commands,
+            entity,
+            *color,
+            pos,
+            facing,
+            &mut cooldown,
+            mods,
+        );
     }
 }

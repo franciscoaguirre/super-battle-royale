@@ -9,10 +9,11 @@
 #   s  spawn  (walkable; players spawn here)
 #   1  box-1  (decorative object on floor; non-interactive for now)
 #   2  box-2  (decorative object on floor; non-interactive for now)
+#   p  pickup pad (walkable; power-ups spawn and respawn here)
 #   (space) / .  void (nothing rendered)
 #
-# More tile types (table, bush, chair, pickup spawn, ...) can be added later by
-# extending `Tile::from_char` in src/game/map.rs.
+# More tile types (table, bush, chair, ...) can be added later by extending
+# `Tile::from_char` in src/game/map.rs.
 #
 # Directives (key: value) configure the map. Currently supported:
 #   song: <name>   background track; one of
@@ -23,12 +24,12 @@ song: shooter_loop
 
 wwwwwwwwwwwwwwww
 wsxxxxxxxxxxxxsw
-wxxxxx1xx2xxxxxw
+wxxxxp1xx2pxxxxw
 wxxwwxxxxxxwwxxw
 wxxwwxxxxxxwwxxw
 wxxxxxxsxsxxxxxw
 wxxxxxxxxxxxxxxw
 wxxwwxx1xxxwwxxw
-wxxwwxxxx2xwwxxw
+wxxwwpxxx2pwwxxw
 wsxxxxxxxxxxxxsw
 wwwwwwwwwwwwwwww

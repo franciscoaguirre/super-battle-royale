@@ -3,15 +3,17 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "client")]
 use super::bot::Bot;
-use super::combat::Dead;
 #[cfg(feature = "client")]
 use super::combat::Health;
+use super::combat::{Dead, SpeedBoost};
 use super::map::{ArenaBounds, CurrentMap};
 use super::net::{NetPos, is_authoritative, is_offline};
 use super::state::GameState;
 
 pub const PLAYER_SIZE: f32 = 32.0;
 const PLAYER_SPEED: f32 = 240.0;
+/// Movement-speed multiplier while a player holds a [`SpeedBoost`] power-up.
+const SPEED_FACTOR: f32 = 1.6;
 
 /// Crack overlay sprites and the health threshold at which each stage appears.
 /// Kept coarse (25 HP steps) so health is readable but not exact.
@@ -141,13 +143,19 @@ fn apply_player_intent(
     time: Res<Time>,
     bounds: Res<ArenaBounds>,
     map: Res<CurrentMap>,
-    mut query: Query<(&mut NetPos, &PlayerIntent), Without<Dead>>,
+    mut query: Query<(&mut NetPos, &PlayerIntent, Option<&SpeedBoost>), Without<Dead>>,
 ) {
     let half = PLAYER_SIZE / 2.0;
-    for (mut pos, intent) in &mut query {
+    for (mut pos, intent, boost) in &mut query {
         // Clamp the magnitude so a client can't request a higher-than-allowed speed.
+        // The clamp is on the *direction*, so a speed power-up still scales it.
         let dir = intent.0.clamp_length_max(1.0);
-        let desired = pos.0 + dir * PLAYER_SPEED * time.delta_secs();
+        let speed = if boost.is_some() {
+            PLAYER_SPEED * SPEED_FACTOR
+        } else {
+            PLAYER_SPEED
+        };
+        let desired = pos.0 + dir * speed * time.delta_secs();
 
         // Slide along walls by resolving movement one axis at a time.
         let mut next = pos.0;

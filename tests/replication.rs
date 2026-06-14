@@ -29,11 +29,13 @@ use super_battle_royale::game::bot::Bot;
 use super_battle_royale::game::net::{
     NetPos, PlayerInput, ShootRequest, protocol_id_for, register_protocol,
 };
+use super_battle_royale::game::pickup::PickupKind;
 use super_battle_royale::game::player::{Player, PlayerColor};
 use super_battle_royale::game::projectile::{Height, Projectile};
 
 const PLAYER_POS: Vec2 = Vec2::new(12.0, -34.0);
 const BOT_POS: Vec2 = Vec2::new(-5.0, 7.0);
+const PICKUP_POS: Vec2 = Vec2::new(40.0, -8.0);
 const TEST_INPUT: Vec2 = Vec2::new(1.0, 0.0);
 
 /// Records the most recent input the server received from a client.
@@ -191,6 +193,33 @@ fn replicates_owner_and_match_and_receives_start() {
         .single(client_app.world())
         .expect("client should see the replicated match info");
     assert_eq!(info.map_index, 2);
+}
+
+/// A server-spawned pickup (carrying its kind) replicates to the client, so
+/// every client can see and draw power-ups in the arena.
+#[test]
+fn replicates_pickups() {
+    let mut server_app = build_app();
+    let mut client_app = build_app();
+
+    server_app
+        .world_mut()
+        .spawn((PickupKind::Damage, NetPos(PICKUP_POS), Replicated));
+
+    let port = setup_server(&mut server_app);
+    setup_client(&mut client_app, port);
+    wait_for_connection(&mut server_app, &mut client_app);
+    for _ in 0..100 {
+        client_app.update();
+        server_app.update();
+    }
+
+    let mut pickups = client_app.world_mut().query::<(&PickupKind, &NetPos)>();
+    let (kind, pos) = pickups
+        .single(client_app.world())
+        .expect("client should see exactly one pickup");
+    assert_eq!(*kind, PickupKind::Damage);
+    assert_eq!(pos.0, PICKUP_POS);
 }
 
 /// Set to true once the client has sent its one shoot request.

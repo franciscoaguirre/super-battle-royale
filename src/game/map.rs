@@ -32,13 +32,13 @@ pub const MAPS: &[(&str, &str)] = &[
 const DEFAULT_MAP: &str = "\
 wwwwwwwwwwwwwwww
 wsxxxxxxxxxxxxsw
-wxxxxx1xx2xxxxxw
+wxxxxp1xx2pxxxxw
 wxxwwxxxxxxwwxxw
 wxxwwxxxxxxwwxxw
 wxxxxxxsxsxxxxxw
 wxxxxxxxxxxxxxxw
 wxxwwxx1xxxwwxxw
-wxxwwxxxx2xwwxxw
+wxxwwpxxx2pwwxxw
 wsxxxxxxxxxxxxsw
 wwwwwwwwwwwwwwww
 ";
@@ -63,6 +63,8 @@ pub enum Tile {
     Box1,
     /// Second decorative box variant; draws floor underneath.
     Box2,
+    /// Walkable floor that is also a power-up pad: pickups spawn and respawn here.
+    PickupSpawn,
 }
 
 impl Tile {
@@ -75,6 +77,7 @@ impl Tile {
             's' => Tile::Spawn,
             '1' => Tile::Box1,
             '2' => Tile::Box2,
+            'p' => Tile::PickupSpawn,
             _ => Tile::Void,
         }
     }
@@ -111,6 +114,7 @@ pub struct TileMap {
     height: usize,
     tiles: Vec<Tile>,
     spawns: Vec<Vec2>,
+    pickup_spawns: Vec<Vec2>,
     song: Song,
 }
 
@@ -161,14 +165,18 @@ impl TileMap {
             height,
             tiles,
             spawns: Vec::new(),
+            pickup_spawns: Vec::new(),
             song,
         };
 
-        // Precompute spawn points in world space now that the size is known.
+        // Precompute spawn and pickup-pad points in world space now that the size
+        // is known.
         for row in 0..height {
             for col in 0..width {
-                if map.tile_at(col as i32, row as i32) == Tile::Spawn {
-                    map.spawns.push(map.cell_center(col, row));
+                match map.tile_at(col as i32, row as i32) {
+                    Tile::Spawn => map.spawns.push(map.cell_center(col, row)),
+                    Tile::PickupSpawn => map.pickup_spawns.push(map.cell_center(col, row)),
+                    _ => {}
                 }
             }
         }
@@ -196,6 +204,11 @@ impl TileMap {
     /// World-space player spawn points, in reading order (top-left first).
     pub fn spawn_points(&self) -> &[Vec2] {
         &self.spawns
+    }
+
+    /// World-space power-up pad locations, in reading order (top-left first).
+    pub fn pickup_points(&self) -> &[Vec2] {
+        &self.pickup_spawns
     }
 
     /// The background track this map requests, defaulting to [`Song::ShooterLoop`]
@@ -489,5 +502,41 @@ mod tests {
 
         let against_bottom_wall = inside - Vec2::new(0.0, TILE_SIZE * 1.5);
         assert!(map.circle_intersects_wall(against_bottom_wall, 10.0));
+    }
+
+    #[test]
+    fn pickup_spawn_tile_parses_and_reports_its_point() {
+        let map = TileMap::parse("wpw");
+        // The 'p' tile becomes a pickup pad whose world point is its cell centre.
+        assert_eq!(map.pickup_points().len(), 1);
+        assert_eq!(map.pickup_points()[0], map.cell_center(1, 0));
+        // It is not a player spawn and does not block movement.
+        assert!(map.spawn_points().is_empty());
+        assert!(!map.circle_intersects_wall(map.cell_center(1, 0), 10.0));
+    }
+
+    /// The embedded fallback map must stay in sync with `arena.txt`, or the game
+    /// silently diverges when the file can't be read. Nothing else enforces this.
+    #[test]
+    fn default_map_matches_arena_file() {
+        let embedded = TileMap::parse(DEFAULT_MAP);
+        let from_file = TileMap::parse(
+            &std::fs::read_to_string("assets/maps/arena.txt").expect("arena.txt should exist"),
+        );
+        assert_eq!(
+            embedded.world_size(),
+            from_file.world_size(),
+            "DEFAULT_MAP grid size diverged from arena.txt"
+        );
+        assert_eq!(
+            embedded.spawn_points(),
+            from_file.spawn_points(),
+            "DEFAULT_MAP spawn points diverged from arena.txt"
+        );
+        assert_eq!(
+            embedded.pickup_points(),
+            from_file.pickup_points(),
+            "DEFAULT_MAP pickup points diverged from arena.txt"
+        );
     }
 }
