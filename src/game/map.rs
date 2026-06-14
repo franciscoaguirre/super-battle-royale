@@ -10,8 +10,8 @@
 
 use bevy::prelude::*;
 
-use super::InGame;
 use super::music::Song;
+#[cfg(feature = "client")]
 use super::state::GameState;
 
 /// Side length, in world units, of a single map tile. All tile art is 64x64.
@@ -74,10 +74,12 @@ impl Tile {
 
     /// Whether a floor sprite should be drawn beneath this tile. Walls are drawn
     /// on top of floor so that the transparent margins of bar/corner art blend in.
+    #[cfg(feature = "client")]
     fn draws_floor(self) -> bool {
         !matches!(self, Tile::Void)
     }
 
+    #[cfg(feature = "client")]
     fn is_wall(self) -> bool {
         matches!(self, Tile::Wall)
     }
@@ -214,6 +216,7 @@ impl TileMap {
         }
     }
 
+    #[cfg(feature = "client")]
     fn is_wall_at(&self, col: i32, row: i32) -> bool {
         self.tile_at(col, row).is_wall()
     }
@@ -221,6 +224,7 @@ impl TileMap {
     /// Picks the wall sprite for cell `(col, row)` from its four orthogonal
     /// neighbours. The art set has no inner (concave) corner pieces, so 4-way
     /// connectivity is exactly the right resolution.
+    #[cfg(feature = "client")]
     fn wall_sprite(&self, col: i32, row: i32) -> &'static str {
         let n = self.is_wall_at(col, row - 1); // file row-1 is up / +y / North
         let e = self.is_wall_at(col + 1, row);
@@ -288,6 +292,7 @@ impl ArenaBounds {
 pub struct CurrentMap(pub TileMap);
 
 /// Marker for spawned wall tiles, so collision can query them later.
+#[cfg(feature = "client")]
 #[derive(Component)]
 pub struct Wall;
 
@@ -303,9 +308,13 @@ impl Plugin for MapPlugin {
         let map = load_map();
         let bounds = map.bounds();
 
-        app.insert_resource(bounds)
-            .insert_resource(CurrentMap(map))
-            .add_systems(OnEnter(GameState::Playing), spawn_map);
+        // Both client and server load the same map deterministically, so only
+        // these resources are shared; the map geometry never needs replicating.
+        app.insert_resource(bounds).insert_resource(CurrentMap(map));
+
+        // Floor/wall sprites are rendered only on the client.
+        #[cfg(feature = "client")]
+        app.add_systems(OnEnter(GameState::Playing), spawn_map);
     }
 }
 
@@ -320,7 +329,9 @@ fn load_map() -> TileMap {
     }
 }
 
+#[cfg(feature = "client")]
 fn spawn_map(mut commands: Commands, asset_server: Res<AssetServer>, map: Res<CurrentMap>) {
+    use super::InGame;
     let map = &map.0;
     let floor = asset_server.load("floor-tiles.png");
 

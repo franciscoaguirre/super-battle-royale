@@ -26,9 +26,14 @@ pub struct FootstepsPlugin;
 
 impl Plugin for FootstepsPlugin {
     fn build(&self, app: &mut App) {
+        // Footsteps are about the *local* player, which only exists in offline
+        // single-player; online clients render remote players whose footsteps we
+        // don't simulate locally.
         app.insert_resource(FootstepState::new()).add_systems(
             Update,
-            play_footsteps.run_if(in_state(super::state::GameState::Playing)),
+            play_footsteps
+                .run_if(in_state(super::state::GameState::Playing))
+                .run_if(super::net::is_offline),
         );
     }
 }

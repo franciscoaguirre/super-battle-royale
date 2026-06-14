@@ -3,8 +3,52 @@ name = "super-battle-royale"
 version = "0.1.0"
 edition = "2024"
 
+# Two binaries share the library crate. `required-features` ensures each
+# `cargo build` only compiles the binary for the feature set being built, so the
+# headless server never pulls in rendering/audio code.
+[[bin]]
+name = "super-battle-royale" # the windowed game client
+path = "src/main.rs"
+required-features = ["client"]
+
+[[bin]]
+name = "server" # the headless, deployable dedicated server
+path = "src/bin/server.rs"
+required-features = ["server"]
+
+[features]
+default = ["client"]
+# The client links the full 2D Bevy stack (rendering, audio, windowing). The
+# `dynamic_linking` feature keeps iterative builds fast (drop it for release).
+client = [
+    "bevy/2d",
+    "bevy/dynamic_linking",
+    "bevy/mp3",
+    "bevy/serialize",
+    "bevy_replicon/client",
+    "bevy_replicon_renet/client",
+]
+# The server is headless: only ECS, state, logging and serialization. No render,
+# audio, windowing or gamepad crates, so it builds on a bare Linux box without
+# Vulkan/ALSA/udev system libraries.
+server = [
+    "bevy/bevy_state",
+    "bevy/bevy_log",
+    "bevy/std",
+    "bevy/async_executor",
+    "bevy/multi_threaded",
+    "bevy/serialize",
+    "bevy_replicon/server",
+    "bevy_replicon_renet/server",
+]
+
 [dependencies]
-bevy = { version = "0.18.1", features = ["dynamic_linking", "mp3"] }
+bevy = { version = "0.18.1", default-features = false }
+bevy_replicon = { version = "0.40.3", default-features = false }
+bevy_replicon_renet = { version = "0.16.0", default-features = false, features = [
+    "renet_netcode",
+] }
+serde = { version = "1", features = ["derive"] }
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
