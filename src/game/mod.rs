@@ -12,6 +12,10 @@ pub mod state;
 #[cfg(feature = "client")]
 pub mod camera;
 #[cfg(feature = "client")]
+pub mod crt;
+#[cfg(feature = "client")]
+pub mod effects;
+#[cfg(feature = "client")]
 pub mod footsteps;
 
 use bevy::prelude::*;
@@ -43,6 +47,8 @@ impl Plugin for GamePlugin {
         #[cfg(feature = "client")]
         app.add_plugins((
             camera::CameraPlugin,
+            crt::CrtPlugin,
+            effects::EffectsPlugin,
             footsteps::FootstepsPlugin,
             music::MusicPlugin,
         ))

@@ -43,7 +43,7 @@ There are **two thin binaries** over one **library** crate (`lib.rs` → `src/ga
 
 ### The plugin-per-subsystem pattern
 
-This is the core convention — **follow it when adding features**. Each subsystem is one file under `src/game/` exposing an `XxxPlugin` (`camera`, `combat`, `enemy`, `footsteps`, `map`, `music`, `player`, `projectile`; networking lives in `src/game/net/`). To add a subsystem: create the module, define its `Plugin`, and add it to the appropriate `add_plugins((...))` group in `mod.rs` (gate render/audio-only plugins behind `#[cfg(feature = "client")]`). A plugin owns its components, constants, spawn system, and update systems.
+This is the core convention — **follow it when adding features**. Each subsystem is one file under `src/game/` exposing an `XxxPlugin` (`camera`, `combat`, `crt`, `effects`, `enemy`, `footsteps`, `map`, `music`, `player`, `projectile`; networking lives in `src/game/net/`). To add a subsystem: create the module, define its `Plugin`, and add it to the appropriate `add_plugins((...))` group in `mod.rs` (gate render/audio-only plugins behind `#[cfg(feature = "client")]`). A plugin owns its components, constants, spawn system, and update systems.
 
 ### State + entity lifecycle
 
@@ -74,6 +74,14 @@ Authoritative client/server via [`bevy_replicon`](https://docs.rs/bevy_replicon)
 - **Combat** (`src/game/combat.rs`) is **PvP only** — the patrolling enemies ("bots") are deliberately ignored, so shots pass through them. A shot damages the first non-owner player it touches (within `HIT_RADIUS`, owner tracked via `ProjectileOwner` on the projectile). `Health` is server/sim-only (no HUD yet, so not replicated); at 0 HP a player gets the replicated `Dead` marker + a `RespawnTimer`, and after a short delay respawns at a spawn point with full health. `Dead` is replicated so clients hide dead players (`hide_dead_players`); dead players can't move or shoot (systems filter `Without<Dead>`). All of this is authoritative (server + offline); offline single-player simply has no other player to damage.
 
 The integration test `tests/replication.rs` (run with `cargo test --features server`) connects a headless client+server over loopback and asserts replication, input, and the shoot→projectile flow end-to-end, plus a direct test of the damage→death combat loop.
+
+### Visual effects (client-only)
+
+A neon look layered on top of the sprites, all gated behind the `client` feature:
+- **Bloom** (`camera.rs`): the camera has a `Bloom` component (auto-enables `Hdr`) with a `threshold` so only HDR-bright pixels glow. Projectiles/trails/sparks use `Color::linear_rgb` values > 1.0 to bloom; the scene art (≤ 1.0) doesn't. `Tonemapping::None` preserves the pixel-art colors.
+- **CRT** (`crt.rs` + `crt.wgsl`): a custom fullscreen post-process node (scanlines + barrel curvature + vignette), modeled on Bevy's `effect_stack` node. Inserted in the `Core2d` graph between `Node2d::PostProcessing` and `Node2d::Tonemapping`, enabled by the `Crt` marker on the camera. Takes no uniforms.
+- **Chromatic aberration** uses Bevy's built-in `ChromaticAberration` component (kept at intensity 0 at rest; pulsed on hits/deaths).
+- **`effects.rs`** drives the rest from replicated signals — `Impact` markers (which carry a world position) and the `Dead` marker, the same hooks the audio uses: impact **sparks** + expanding **shockwave rings** (using procedurally-generated dot/ring textures), **screen shake** (trauma-based camera offset), and the chromatic-aberration **pulse**. Because they key off replicated state, they fire identically offline, on the host, and on every client.
 
 ### Assets
 

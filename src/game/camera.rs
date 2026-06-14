@@ -1,9 +1,11 @@
 use bevy::camera::ScalingMode;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::{Bloom, BloomCompositeMode, BloomPrefilter};
+use bevy::post_process::effect_stack::ChromaticAberration;
 use bevy::prelude::*;
 
 use super::InGame;
+use super::crt::Crt;
 use super::map::ArenaBounds;
 
 pub struct CameraPlugin;
@@ -42,6 +44,14 @@ fn spawn_camera(mut commands: Commands, bounds: Res<ArenaBounds>) {
         // Skip tonemapping so the SDR sprite art keeps its authored colors; the
         // additive bloom is layered on top.
         Tonemapping::None,
+        // Chromatic aberration, kept at zero intensity at rest and pulsed by the
+        // effects system on hits/deaths. At zero it's skipped entirely.
+        ChromaticAberration {
+            intensity: 0.0,
+            ..default()
+        },
+        // Subtle CRT post-process (scanlines + curvature + vignette).
+        Crt,
         InGame,
     ));
 }

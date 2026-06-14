@@ -102,7 +102,7 @@ fn apply_projectile_hits(
             }
             if projectile_pos.0.distance(player_pos.0) <= HIT_RADIUS {
                 health.current -= PROJECTILE_DAMAGE;
-                spawn_impact(&mut commands, ImpactKind::Object);
+                spawn_impact(&mut commands, ImpactKind::Object, player_pos.0);
                 commands.entity(projectile).try_despawn();
                 break; // a shot hits at most one player
             }
