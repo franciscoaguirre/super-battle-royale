@@ -86,6 +86,7 @@ impl Tile {
 
     /// Asset path for a sprite drawn on top of the floor for this tile, if any.
     /// Extension point for future object tiles (table, bush, ...).
+    #[cfg(feature = "client")]
     fn object_sprite(self) -> Option<&'static str> {
         match self {
             Tile::Box1 => Some("box-1.png"),
@@ -216,6 +217,7 @@ impl TileMap {
         }
     }
 
+    #[cfg(feature = "client")]
     fn is_wall_at(&self, col: i32, row: i32) -> bool {
         self.tile_at(col, row).is_wall()
     }

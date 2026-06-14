@@ -27,7 +27,7 @@ pub use protocol::{NetPos, PlayerInput, ShootRequest};
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 
-use super::combat::Dead;
+use super::combat::{Dead, Health};
 use super::enemy::Enemy;
 use super::player::{Player, PlayerColor};
 use super::projectile::{Height, Impact, Projectile, ShotColor};
@@ -59,6 +59,7 @@ pub fn register_protocol(app: &mut App) {
     app.replicate::<NetPos>()
         .replicate::<Player>()
         .replicate::<PlayerColor>()
+        .replicate::<Health>()
         .replicate::<Enemy>()
         .replicate::<Projectile>()
         .replicate::<Height>()
