@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 
 use super::map::{self, MAPS};
-use super::net::{MatchInfo, NetRole, StartMatch, YouAreOwner, is_offline};
+use super::net::{MatchInfo, MatchPhase, NetRole, StartMatch, Winner, YouAreOwner, is_offline};
 use super::state::{GameState, MatchConfig};
 
 /// Largest bot count the owner can dial up to in the lobby.
@@ -39,10 +39,9 @@ impl Plugin for LobbyPlugin {
                 (handle_buttons, update_labels, update_visibility)
                     .run_if(in_state(GameState::Lobby)),
             )
-            // The owner client learns it's the owner; every online client reacts
-            // to the match starting. Both are no-ops in the other modes.
-            .add_observer(on_you_are_owner)
-            .add_observer(on_match_started);
+            // The owner client learns it's the owner (no-op in other modes).
+            // Online clients follow the match lifecycle via `match_flow`.
+            .add_observer(on_you_are_owner);
     }
 }
 
@@ -308,6 +307,14 @@ fn handle_buttons(
                         config.map_index = draft.map_index;
                         config.bot_count = draft.bot_count;
                         map::insert_map_resources(&mut commands, draft.map_index);
+                        // The match-state singleton (local, not replicated offline)
+                        // that `match_flow` drives and the winner banner reads.
+                        commands.spawn(MatchInfo {
+                            map_index: draft.map_index,
+                            round: 0,
+                            phase: MatchPhase::Playing,
+                            winner: Winner::Draw,
+                        });
                         next.set(GameState::Playing);
                     }
                     NetRole::OnlineClient => {
@@ -380,26 +387,4 @@ fn update_visibility(
 fn on_you_are_owner(_event: On<YouAreOwner>, mut is_owner: ResMut<IsOwner>) {
     is_owner.0 = true;
     info!("you are the game owner");
-}
-
-/// When the replicated [`MatchInfo`] appears, an online client loads the chosen
-/// map and joins the match. Inserts map resources before the state change.
-fn on_match_started(
-    add: On<Add, MatchInfo>,
-    infos: Query<&MatchInfo>,
-    role: Res<NetRole>,
-    mut commands: Commands,
-    mut config: ResMut<MatchConfig>,
-    mut next: ResMut<NextState<GameState>>,
-) {
-    if *role != NetRole::OnlineClient {
-        return;
-    }
-    let Ok(info) = infos.get(add.entity) else {
-        return;
-    };
-    config.map_index = info.map_index;
-    map::insert_map_resources(&mut commands, info.map_index);
-    next.set(GameState::Playing);
-    info!("match started on map {}", info.map_index);
 }

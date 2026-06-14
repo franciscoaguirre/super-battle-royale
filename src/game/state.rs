@@ -13,6 +13,9 @@ pub enum GameState {
     Lobby,
     /// The match is live: the arena, players and bots exist and simulate.
     Playing,
+    /// A round just ended: the scene is frozen, the winner is announced, and the
+    /// authoritative side counts down before advancing to the next map.
+    GameOver,
 }
 
 /// The configuration the match runs with: which map (index into

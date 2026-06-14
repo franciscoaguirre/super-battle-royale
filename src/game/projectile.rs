@@ -417,6 +417,9 @@ fn spawn_projectile(
             vertical: 0.0,
         },
         Replicated,
+        // Authoritative-side tag so leftover in-flight shots are cleared on a map
+        // switch. Clients render the replicated shot and let replicon despawn it.
+        super::InGame,
     ));
     if zigzag {
         // Seed the weave phase from the launch angle so a multi-shot burst fans out.
@@ -494,7 +497,6 @@ fn attach_projectile_sprite(
                     ..default()
                 },
                 Transform::from_xyz(pos.0.x, pos.0.y + height.0, 20.0),
-                super::InGame,
             ))
             .with_children(|parent| {
                 // Local offset cancels the parent's altitude so the shadow stays

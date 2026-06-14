@@ -20,8 +20,8 @@ const BOT_AIM_THRESHOLD: f32 = 0.95;
 #[derive(Component, Serialize, Deserialize, Debug, Clone, Copy, Default)]
 pub struct Bot;
 
-/// Server-only AI state: which player the bot is currently hunting and which
-/// direction it wanders when no target is visible.
+/// Server-only AI state: which combatant (player or other bot) the bot is
+/// currently hunting and which direction it wanders when no target is visible.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct BotAI {
     target: Option<Entity>,
@@ -92,25 +92,29 @@ fn spawn_bots(mut commands: Commands, map: Res<CurrentMap>, config: Res<MatchCon
     }
 }
 
-/// Each live bot picks the nearest live player as its target.
+/// Each live bot picks the nearest live combatant — any player *or other bot* —
+/// as its target. Including other bots (not just players) means the surviving
+/// bots turn on each other once every player is dead, so the round still
+/// resolves to a single winner instead of stalling forever (see
+/// `match_flow::check_for_winner`).
 #[allow(clippy::type_complexity)]
 fn select_bot_targets(
     mut bots: Query<(Entity, &NetPos, &mut BotAI), (With<Bot>, Without<Dead>)>,
-    players: Query<(Entity, &NetPos), (With<super::player::Player>, Without<Dead>)>,
+    targets: Query<(Entity, &NetPos), (Or<(With<super::player::Player>, With<Bot>)>, Without<Dead>)>,
 ) {
     for (bot_entity, bot_pos, mut ai) in &mut bots {
         let mut nearest = None;
         let mut nearest_dist = BOT_DETECTION_RANGE * BOT_DETECTION_RANGE;
 
-        for (player_entity, player_pos) in &players {
-            // Don't target yourself (relevant if bots ever get a Player tag).
-            if player_entity == bot_entity {
+        for (target_entity, target_pos) in &targets {
+            // The target set now includes bots, so skip ourselves.
+            if target_entity == bot_entity {
                 continue;
             }
-            let dist_sq = bot_pos.0.distance_squared(player_pos.0);
+            let dist_sq = bot_pos.0.distance_squared(target_pos.0);
             if dist_sq < nearest_dist {
                 nearest_dist = dist_sq;
-                nearest = Some(player_entity);
+                nearest = Some(target_entity);
             }
         }
 
@@ -125,7 +129,7 @@ fn update_bot_intent(
     time: Res<Time>,
     bounds: Res<ArenaBounds>,
     mut bots: Query<(&NetPos, &mut BotAI, &mut BotIntent), (With<Bot>, Without<Dead>)>,
-    players: Query<&NetPos, (With<super::player::Player>, Without<Dead>)>,
+    targets: Query<&NetPos, (Or<(With<super::player::Player>, With<Bot>)>, Without<Dead>)>,
 ) {
     let half = BOT_SIZE / 2.0;
     let min_x = bounds.min.x + half;
@@ -135,7 +139,7 @@ fn update_bot_intent(
 
     for (pos, mut ai, mut intent) in &mut bots {
         if let Some(target) = ai.target {
-            if let Ok(target_pos) = players.get(target) {
+            if let Ok(target_pos) = targets.get(target) {
                 let to_target = target_pos.0 - pos.0;
                 intent.0 = to_target.normalize_or_zero();
                 continue;
@@ -211,13 +215,13 @@ fn bot_shoot(
         ),
         (With<Bot>, Without<Dead>),
     >,
-    players: Query<&NetPos, (With<super::player::Player>, Without<Dead>)>,
+    targets: Query<&NetPos, (Or<(With<super::player::Player>, With<Bot>)>, Without<Dead>)>,
 ) {
     for (entity, pos, facing, mut cooldown, color, ai) in bots {
         let Some(target) = ai.target else {
             continue;
         };
-        let Ok(target_pos) = players.get(target) else {
+        let Ok(target_pos) = targets.get(target) else {
             continue;
         };
 
@@ -254,6 +258,9 @@ fn attach_bot_sprite(
     query: Query<(Entity, &NetPos), (With<Bot>, Without<Sprite>)>,
 ) {
     for (entity, pos) in &query {
+        // No `InGame`: bots are replicated online (replicon owns their lifecycle);
+        // offline bots carry `InGame` from `spawn_bots`. Tagging the client-side
+        // replicated entity would fight replicon on the map-switch cleanup.
         commands.entity(entity).insert((
             Sprite {
                 image: asset_server.load("sphere_gray.png"),
@@ -261,7 +268,49 @@ fn attach_bot_sprite(
                 ..default()
             },
             Transform::from_xyz(pos.0.x, pos.0.y, 10.0),
-            super::InGame,
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: with no players left alive, surviving bots must hunt *each
+    /// other* (not give up with `target = None`), otherwise multiple bots stay
+    /// alive forever and `match_flow::check_for_winner` never fires.
+    #[test]
+    fn bots_target_each_other_when_no_players_remain() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_systems(Update, select_bot_targets);
+
+        let a = app
+            .world_mut()
+            .spawn((
+                Bot,
+                BotAI {
+                    target: None,
+                    wander: Vec2::X,
+                },
+                NetPos(Vec2::ZERO),
+            ))
+            .id();
+        let b = app
+            .world_mut()
+            .spawn((
+                Bot,
+                BotAI {
+                    target: None,
+                    wander: Vec2::X,
+                },
+                NetPos(Vec2::new(60.0, 0.0)),
+            ))
+            .id();
+
+        app.update();
+
+        assert_eq!(app.world().get::<BotAI>(a).unwrap().target, Some(b));
+        assert_eq!(app.world().get::<BotAI>(b).unwrap().target, Some(a));
     }
 }

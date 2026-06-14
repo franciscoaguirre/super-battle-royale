@@ -137,7 +137,7 @@ fn rejects_client_with_wrong_join_code() {
 /// `MatchInfo` the server spawns in response replicates back with its map index.
 #[test]
 fn replicates_owner_and_match_and_receives_start() {
-    use super_battle_royale::game::net::{MatchInfo, Owner, StartMatch};
+    use super_battle_royale::game::net::{MatchInfo, MatchPhase, Owner, StartMatch, Winner};
 
     let mut server_app = build_app();
     let mut client_app = build_app();
@@ -155,6 +155,9 @@ fn replicates_owner_and_match_and_receives_start() {
         commands.spawn((
             MatchInfo {
                 map_index: req.map_index,
+                round: 3,
+                phase: MatchPhase::Ended,
+                winner: Winner::Bot,
             },
             Replicated,
         ));
@@ -193,12 +196,16 @@ fn replicates_owner_and_match_and_receives_start() {
         .expect("client should see exactly one owner player");
     assert_eq!(owner_pos.0, PLAYER_POS);
 
-    // The server spawned a MatchInfo in response to StartMatch, and it replicated.
+    // The server spawned a MatchInfo in response to StartMatch, and it replicated
+    // with all its fields (map + the round-lifecycle phase/winner the client follows).
     let mut infos = client_app.world_mut().query::<&MatchInfo>();
     let info = infos
         .single(client_app.world())
         .expect("client should see the replicated match info");
     assert_eq!(info.map_index, 2);
+    assert_eq!(info.round, 3);
+    assert_eq!(info.phase, MatchPhase::Ended);
+    assert_eq!(info.winner, Winner::Bot);
 }
 
 /// A server-spawned pickup (carrying its kind) replicates to the client, so
@@ -345,8 +352,8 @@ fn projectile_damages_and_kills_non_owner() {
     );
 }
 
-/// Exercises the authoritative combat loop against an bot: a player-owned
-/// shot damages an bot, and the bot dies and respawns after the delay.
+/// Exercises the authoritative combat loop against a bot: a player-owned shot
+/// damages a bot, it dies, and death is permanent for the round (no respawn).
 #[test]
 fn projectile_damages_and_kills_bot() {
     use super_battle_royale::game::combat::{CombatPlugin, Dead, Health};
@@ -401,19 +408,16 @@ fn projectile_damages_and_kills_bot() {
         "an bot hit should spawn an Object impact"
     );
 
-    // Step through the respawn delay; the bot should come back to life.
+    // Death is permanent for the round: long after dying, the bot is still dead
+    // (no respawn) and stays at zero health.
     for _ in 0..240 {
         app.update();
     }
     assert!(
-        app.world().get::<Dead>(bot).is_none(),
-        "bot should respawn and lose Dead marker"
+        app.world().get::<Dead>(bot).is_some(),
+        "death should be permanent — no respawn within a round"
     );
-    assert_eq!(
-        app.world().get::<Health>(bot).unwrap().current,
-        100.0,
-        "bot should respawn with full health"
-    );
+    assert!(app.world().get::<Health>(bot).unwrap().current <= 0.0);
 }
 
 /// The prediction plumbing — the per-player `ControllingClient` (owner id, used
