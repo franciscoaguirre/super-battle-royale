@@ -30,6 +30,19 @@ cargo run --bin super-battle-royale -- play.example.com:7777     # custom port
 
 With no argument the client runs offline single-player.
 
+For a one-command multiplayer test, `scripts/dev.sh` builds everything, starts a
+local server, and launches two clients connected to it (Ctrl-C tears it down):
+
+```bash
+scripts/dev.sh        # or: scripts/dev.sh <port>
+```
+
+## Controls
+
+- **Move:** WASD or arrow keys.
+- **Shoot:** Space — fires a shot in your last-moved direction. Shots fly straight
+  and slowly sink under gravity, crashing into the ground after a short distance.
+
 ## Architecture
 
 This is a server-authoritative design backed by

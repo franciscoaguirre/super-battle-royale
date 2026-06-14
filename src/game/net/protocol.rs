@@ -28,3 +28,11 @@ pub struct NetPos(pub Vec2);
 pub struct PlayerInput {
     pub dir: Vec2,
 }
+
+/// Fire request sent from a client to the server when the player presses shoot.
+///
+/// Carries no aim data: the server fires in the player's tracked `Facing`, so the
+/// client only needs to say "I shot". Sent on a reliable channel since a shot is
+/// a discrete action we don't want to drop.
+#[derive(Event, Serialize, Deserialize, Clone, Copy, Debug, Default)]
+pub struct ShootRequest;

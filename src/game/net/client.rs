@@ -15,7 +15,7 @@ use bevy_replicon_renet::{
     renet::ConnectionConfig,
 };
 
-use super::{PROTOCOL_ID, PlayerInput, register_protocol};
+use super::{PROTOCOL_ID, PlayerInput, ShootRequest, register_protocol};
 use crate::game::player::input_direction;
 
 /// The server endpoint this client should connect to.
@@ -33,8 +33,11 @@ impl Plugin for ClientNetPlugin {
         register_protocol(app);
         app.insert_resource(ServerEndpoint(self.server_addr))
             .add_systems(Startup, setup_client)
-            // Only stream input once the connection is established.
-            .add_systems(Update, send_input.run_if(in_state(ClientState::Connected)));
+            // Only send input once the connection is established.
+            .add_systems(
+                Update,
+                (send_input, send_shoot_request).run_if(in_state(ClientState::Connected)),
+            );
     }
 }
 
@@ -76,4 +79,12 @@ fn send_input(mut commands: Commands, input: Res<ButtonInput<KeyCode>>) {
     commands.client_trigger(PlayerInput {
         dir: input_direction(&input),
     });
+}
+
+/// Asks the server to fire when the player presses Space. The server picks the
+/// direction from the player's tracked facing.
+fn send_shoot_request(mut commands: Commands, input: Res<ButtonInput<KeyCode>>) {
+    if input.just_pressed(KeyCode::Space) {
+        commands.client_trigger(ShootRequest);
+    }
 }

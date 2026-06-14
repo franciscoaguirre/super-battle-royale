@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use super::combat::Dead;
 use super::map::{ArenaBounds, CurrentMap};
 use super::net::{NetPos, is_authoritative, is_offline};
 use super::state::GameState;
@@ -113,7 +114,7 @@ fn spawn_player(mut commands: Commands, selected: Res<SelectedColor>, map: Res<C
 fn apply_player_intent(
     time: Res<Time>,
     bounds: Res<ArenaBounds>,
-    mut query: Query<(&mut NetPos, &PlayerIntent)>,
+    mut query: Query<(&mut NetPos, &PlayerIntent), Without<Dead>>,
 ) {
     let half = PLAYER_SIZE / 2.0;
     for (mut pos, intent) in &mut query {
