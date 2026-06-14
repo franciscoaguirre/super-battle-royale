@@ -8,8 +8,12 @@ use super_battle_royale::game::net::{DEFAULT_PORT, NetRole};
 /// The windowed game client.
 ///
 /// Usage:
-///   super-battle-royale                 # offline single-player
-///   super-battle-royale <domain[:port]> # connect to a dedicated server
+///   super-battle-royale                        # offline single-player
+///   super-battle-royale <domain[:port]> [code] # connect to a dedicated server
+///
+/// The join code may also be supplied via the `JOIN_CODE` env var (the CLI arg
+/// takes precedence). It must match the server's code or the connection is
+/// refused. Offline single-player needs no code.
 fn main() {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -24,10 +28,18 @@ fn main() {
         Some(arg) => {
             let server_addr = resolve_server(&arg)
                 .unwrap_or_else(|err| panic!("could not resolve server `{arg}`: {err}"));
+            // Code from the CLI (arg 2) takes precedence over the JOIN_CODE env var.
+            let join_code = std::env::args()
+                .nth(2)
+                .or_else(|| std::env::var("JOIN_CODE").ok())
+                .unwrap_or_default();
             info!("starting online client → {server_addr}");
             app.insert_resource(NetRole::OnlineClient)
                 .add_plugins(GamePlugin)
-                .add_plugins(ClientNetPlugin { server_addr });
+                .add_plugins(ClientNetPlugin {
+                    server_addr,
+                    join_code,
+                });
         }
         None => {
             info!("starting offline single-player");

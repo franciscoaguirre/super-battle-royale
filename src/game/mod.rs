@@ -17,10 +17,14 @@ pub mod crt;
 pub mod effects;
 #[cfg(feature = "client")]
 pub mod footsteps;
+#[cfg(feature = "client")]
+pub mod lobby;
+#[cfg(feature = "client")]
+pub mod ping;
 
 use bevy::prelude::*;
 
-use state::GameState;
+use state::{GameState, MatchConfig};
 
 /// Top-level plugin that wires up the entire game.
 ///
@@ -35,6 +39,7 @@ pub struct GamePlugin;
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         app.init_state::<GameState>()
+            .init_resource::<MatchConfig>()
             .add_plugins((
                 combat::CombatPlugin,
                 bot::BotPlugin,
@@ -50,7 +55,9 @@ impl Plugin for GamePlugin {
             crt::CrtPlugin,
             effects::EffectsPlugin,
             footsteps::FootstepsPlugin,
+            lobby::LobbyPlugin,
             music::MusicPlugin,
+            ping::PingPlugin,
         ))
         .add_systems(PostUpdate, net::sync_netpos_to_transform);
     }
