@@ -6,20 +6,24 @@ use super::bot::Bot;
 use super::combat::Dead;
 #[cfg(feature = "client")]
 use super::combat::Health;
+use super::combat::give_spawn_invulnerability;
 use super::map::{ArenaBounds, CurrentMap};
 use super::net::{NetPos, is_authoritative, is_offline};
+#[cfg(feature = "client")]
+use super::shield::ShieldState;
+use super::shield::{ShieldTickSet, insert_shield};
 use super::state::GameState;
 
 pub const PLAYER_SIZE: f32 = 32.0;
 const PLAYER_SPEED: f32 = 240.0;
 
 /// Crack overlay sprites and the health threshold at which each stage appears.
-/// Kept coarse (25 HP steps) so health is readable but not exact.
+/// Thresholds are tuned for 2 HP so cracks give readable damage feedback.
 #[cfg(feature = "client")]
 const CRACK_STAGES: [(&str, f32); 3] = [
-    ("cracks_1.png", 75.0),
-    ("cracks_2.png", 50.0),
-    ("cracks_3.png", 25.0),
+    ("cracks_1.png", 1.5),
+    ("cracks_2.png", 1.0),
+    ("cracks_3.png", 0.5),
 ];
 
 /// Marker that a player already has crack-overlay children spawned.
@@ -101,7 +105,8 @@ impl Plugin for PlayerPlugin {
                 Update,
                 apply_player_intent
                     .run_if(in_state(GameState::Playing))
-                    .run_if(is_authoritative),
+                    .run_if(is_authoritative)
+                    .after(ShieldTickSet),
             );
 
         // Local input and rendering only exist in the windowed client.
@@ -113,6 +118,10 @@ impl Plugin for PlayerPlugin {
                     .run_if(in_state(GameState::Playing))
                     .run_if(is_offline)
                     .before(apply_player_intent),
+                read_local_shield
+                    .run_if(in_state(GameState::Playing))
+                    .run_if(is_offline)
+                    .before(ShieldTickSet),
                 attach_player_sprite.run_if(in_state(GameState::Playing)),
                 attach_health_cracks.run_if(in_state(GameState::Playing)),
                 update_health_cracks.run_if(in_state(GameState::Playing)),
@@ -125,23 +134,31 @@ impl Plugin for PlayerPlugin {
 /// [`attach_player_sprite`], so this only sets up the logical entity.
 fn spawn_player(mut commands: Commands, selected: Res<SelectedColor>, map: Res<CurrentMap>) {
     let spawn = map.0.spawn_points().first().copied().unwrap_or(Vec2::ZERO);
-    commands.spawn((
-        Player,
-        selected.0,
-        NetPos(spawn),
-        PlayerIntent::default(),
-        super::InGame,
-    ));
+    let entity = commands
+        .spawn((
+            Player,
+            selected.0,
+            NetPos(spawn),
+            PlayerIntent::default(),
+            super::InGame,
+        ))
+        .id();
+    insert_shield(&mut commands, entity);
+    give_spawn_invulnerability(&mut commands, entity);
 }
 
 /// Advances every player's authoritative position from its intent, sliding
 /// along map walls and clamped to the arena. Runs on the server and in offline
-/// single-player.
-fn apply_player_intent(
+/// single-player. Shielding players are rooted.
+#[allow(clippy::type_complexity)]
+pub(crate) fn apply_player_intent(
     time: Res<Time>,
     bounds: Res<ArenaBounds>,
     map: Res<CurrentMap>,
-    mut query: Query<(&mut NetPos, &PlayerIntent), Without<Dead>>,
+    mut query: Query<
+        (&mut NetPos, &PlayerIntent),
+        (Without<Dead>, Without<super::shield::Shielding>),
+    >,
 ) {
     let half = PLAYER_SIZE / 2.0;
     for (mut pos, intent) in &mut query {
@@ -198,6 +215,18 @@ fn read_local_input(
     let dir = input_direction(&input);
     for mut intent in &mut query {
         intent.0 = dir;
+    }
+}
+
+/// Offline: set the local player's shield request from Left/Right Shift.
+#[cfg(feature = "client")]
+fn read_local_shield(
+    input: Res<ButtonInput<KeyCode>>,
+    mut query: Query<&mut ShieldState, With<Player>>,
+) {
+    let pressed = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
+    for mut shield in &mut query {
+        shield.requested = pressed;
     }
 }
 

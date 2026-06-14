@@ -12,15 +12,21 @@ use super::bot::Bot;
 use super::map::CurrentMap;
 use super::net::{NetPos, is_authoritative};
 use super::player::{PLAYER_SIZE, Player};
-use super::projectile::{ImpactKind, PROJECTILE_RADIUS, Projectile, ProjectileOwner, spawn_impact};
+use super::projectile::{
+    ImpactKind, PROJECTILE_RADIUS, Projectile, ProjectileOwner, ProjectileVelocity, spawn_impact,
+};
+use super::shield::{ShieldState, is_parry_window, reflect_projectile};
 use super::state::GameState;
 
-/// Starting (and maximum) player health.
-const MAX_HEALTH: f32 = 100.0;
+/// Starting (and maximum) player health. Kept low so every unblocked hit is
+/// threatening; the shield is the primary defensive tool.
+const MAX_HEALTH: f32 = 2.0;
 /// Damage one shot deals on contact.
-const PROJECTILE_DAMAGE: f32 = 25.0;
+const PROJECTILE_DAMAGE: f32 = 1.0;
 /// Seconds a player stays dead before respawning.
 const RESPAWN_DELAY: f32 = 2.0;
+/// Seconds of invulnerability after spawning or respawning.
+const SPAWN_INVULNERABILITY_DURATION: f32 = 2.0;
 /// A shot hits a player when their centres are within this distance.
 const HIT_RADIUS: f32 = PLAYER_SIZE / 2.0 + PROJECTILE_RADIUS;
 
@@ -49,6 +55,35 @@ pub struct Dead;
 #[derive(Component)]
 struct RespawnTimer(Timer);
 
+/// Server/sim-only marker: the player or bot is invulnerable after spawning
+/// or respawning. Removed once [`SPAWN_INVULNERABILITY_DURATION`] elapses.
+#[derive(Component)]
+pub struct SpawnInvulnerability(pub Timer);
+
+/// Server/sim-only marker: this entity should heal by the stored amount once
+/// hits have been resolved. Inserted on a killer in [`apply_hit_resolutions`]
+/// and consumed by [`apply_pending_heals`].
+#[derive(Component)]
+struct HealOnKill(f32);
+
+/// Server/sim-only marker attached to a projectile that hit something this
+/// frame, storing the result so it can be applied in a follow-up system with
+/// disjoint mutable queries.
+#[derive(Component, Clone, Copy)]
+struct HitResolution {
+    target: Entity,
+    owner: Entity,
+    hit_pos: Vec2,
+    kind: HitKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HitKind {
+    Damage,
+    Parry,
+    Block,
+}
+
 pub struct CombatPlugin;
 
 impl Plugin for CombatPlugin {
@@ -59,7 +94,11 @@ impl Plugin for CombatPlugin {
             Update,
             (
                 ensure_health,
+                tick_spawn_invulnerability,
                 apply_projectile_hits,
+                apply_damage_and_blocks,
+                apply_parry_reflections,
+                apply_pending_heals,
                 handle_deaths,
                 tick_respawns,
             )
@@ -89,53 +128,184 @@ fn ensure_health(
     }
 }
 
-/// Damages the first live, non-owner player or bot a shot touches, then
-/// despawns it. Players are checked before bots so a shot never "passes
-/// through" a player to hit a bot behind them.
+/// Gives an entity temporary spawn invulnerability. Used by player/bot spawn
+/// systems so freshly-spawned actors cannot be spawn-camped.
+pub(crate) fn give_spawn_invulnerability(commands: &mut Commands, entity: Entity) {
+    commands
+        .entity(entity)
+        .insert(SpawnInvulnerability(Timer::from_seconds(
+            SPAWN_INVULNERABILITY_DURATION,
+            TimerMode::Once,
+        )));
+}
+
+/// Ticks down spawn invulnerability timers and removes the marker once it
+/// expires.
+fn tick_spawn_invulnerability(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut entities: Query<(Entity, &mut SpawnInvulnerability)>,
+) {
+    for (entity, mut inv) in &mut entities {
+        if inv.0.tick(time.delta()).just_finished() {
+            commands.entity(entity).remove::<SpawnInvulnerability>();
+        }
+    }
+}
+
+/// Detects projectile hits in one pass and stores the result on the
+/// projectile. Applying the result (damage, reflection, despawn) happens in
+/// [`apply_hit_resolutions`] with disjoint mutable queries.
 #[allow(clippy::type_complexity)]
 fn apply_projectile_hits(
     mut commands: Commands,
+    time: Res<Time>,
     projectiles: Query<(Entity, &NetPos, &ProjectileOwner), With<Projectile>>,
     mut targets: ParamSet<(
-        Query<(Entity, &NetPos, &mut Health), (With<Player>, Without<Dead>)>,
-        Query<(Entity, &NetPos, &mut Health), (With<Bot>, Without<Dead>)>,
+        Query<
+            (Entity, &NetPos, &ShieldState),
+            (With<Player>, Without<Dead>, Without<SpawnInvulnerability>),
+        >,
+        Query<
+            (Entity, &NetPos, &ShieldState),
+            (With<Bot>, Without<Dead>, Without<SpawnInvulnerability>),
+        >,
     )>,
 ) {
     for (projectile, projectile_pos, owner) in &projectiles {
-        let mut hit = false;
+        let mut resolution = None;
 
-        for (player, player_pos, mut health) in targets.p0() {
+        for (player, player_pos, shield) in targets.p0() {
             if player == owner.0 {
                 continue;
             }
             if projectile_pos.0.distance(player_pos.0) <= HIT_RADIUS {
-                health.current -= PROJECTILE_DAMAGE;
-                spawn_impact(&mut commands, ImpactKind::Object, player_pos.0);
-                hit = true;
+                resolution = Some(build_resolution(
+                    &time,
+                    shield,
+                    player,
+                    player_pos.0,
+                    owner.0,
+                ));
                 break;
             }
         }
 
-        if hit {
-            commands.entity(projectile).try_despawn();
-            continue;
-        }
-
-        for (bot, bot_pos, mut health) in targets.p1() {
-            if bot == owner.0 {
-                continue;
-            }
-            if projectile_pos.0.distance(bot_pos.0) <= HIT_RADIUS {
-                health.current -= PROJECTILE_DAMAGE;
-                spawn_impact(&mut commands, ImpactKind::Object, bot_pos.0);
-                hit = true;
-                break;
+        if resolution.is_none() {
+            for (bot, bot_pos, shield) in targets.p1() {
+                if bot == owner.0 {
+                    continue;
+                }
+                if projectile_pos.0.distance(bot_pos.0) <= HIT_RADIUS {
+                    resolution = Some(build_resolution(&time, shield, bot, bot_pos.0, owner.0));
+                    break;
+                }
             }
         }
 
-        if hit {
-            commands.entity(projectile).try_despawn();
+        if let Some(resolution) = resolution {
+            commands.entity(projectile).insert(resolution);
         }
+    }
+}
+
+/// Builds a [`HitResolution`] for a projectile that reached a live target.
+fn build_resolution(
+    time: &Time,
+    shield: &ShieldState,
+    target: Entity,
+    target_pos: Vec2,
+    owner: Entity,
+) -> HitResolution {
+    let kind = if matches!(shield.status, super::shield::ShieldStatus::Active { .. }) {
+        if is_parry_window(shield, time) {
+            HitKind::Parry
+        } else {
+            HitKind::Block
+        }
+    } else {
+        HitKind::Damage
+    };
+    HitResolution {
+        target,
+        owner,
+        hit_pos: target_pos,
+        kind,
+    }
+}
+
+/// Applies normal damage hits and shield blocks from the [`HitResolution`]
+/// components queued by [`apply_projectile_hits`]. Uses a health query that is
+/// explicitly disjoint from the projectile query.
+#[allow(clippy::type_complexity)]
+fn apply_damage_and_blocks(
+    mut commands: Commands,
+    mut targets: Query<&mut Health, Without<Projectile>>,
+    projectiles: Query<(Entity, &HitResolution), With<Projectile>>,
+) {
+    for (entity, resolution) in &projectiles {
+        match resolution.kind {
+            HitKind::Damage => {
+                if let Ok(mut health) = targets.get_mut(resolution.target) {
+                    let kill_shot = health.current - PROJECTILE_DAMAGE <= 0.0;
+                    if kill_shot {
+                        commands.entity(resolution.owner).insert(HealOnKill(1.0));
+                    }
+                    health.current -= PROJECTILE_DAMAGE;
+                    spawn_impact(&mut commands, ImpactKind::Object, resolution.hit_pos);
+                }
+                commands.entity(entity).despawn();
+            }
+            HitKind::Block => {
+                spawn_impact(&mut commands, ImpactKind::Shield, resolution.hit_pos);
+                commands.entity(entity).despawn();
+            }
+            HitKind::Parry => {
+                // Parries are handled by [`apply_parry_reflections`].
+            }
+        }
+    }
+}
+
+/// Reflects projectiles marked as parries by [`apply_projectile_hits`].
+#[allow(clippy::type_complexity)]
+fn apply_parry_reflections(
+    mut commands: Commands,
+    mut projectiles: Query<
+        (
+            Entity,
+            &mut NetPos,
+            &mut ProjectileOwner,
+            &mut ProjectileVelocity,
+            &HitResolution,
+        ),
+        With<Projectile>,
+    >,
+) {
+    for (entity, mut pos, mut owner, mut velocity, resolution) in &mut projectiles {
+        if let HitKind::Parry = resolution.kind {
+            reflect_projectile(
+                &mut pos,
+                &mut velocity,
+                &mut owner,
+                resolution.target,
+                resolution.hit_pos,
+            );
+            spawn_impact(&mut commands, ImpactKind::Parry, pos.0);
+            commands.entity(entity).remove::<HitResolution>();
+        }
+    }
+}
+
+/// Consumes queued heals, capping at max health.
+#[allow(clippy::type_complexity)]
+fn apply_pending_heals(
+    mut commands: Commands,
+    mut entities: Query<(Entity, &mut Health, &HealOnKill)>,
+) {
+    for (entity, mut health, heal) in &mut entities {
+        health.current = (health.current + heal.0).min(health.max);
+        commands.entity(entity).remove::<HealOnKill>();
     }
 }
 
@@ -176,6 +346,12 @@ fn tick_respawns(
             }
             health.current = health.max;
             commands.entity(entity).remove::<(Dead, RespawnTimer)>();
+            commands
+                .entity(entity)
+                .insert(SpawnInvulnerability(Timer::from_seconds(
+                    SPAWN_INVULNERABILITY_DURATION,
+                    TimerMode::Once,
+                )));
         }
     }
 }

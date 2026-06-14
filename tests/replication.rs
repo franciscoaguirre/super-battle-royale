@@ -259,41 +259,63 @@ fn projectile_damages_and_kills_non_owner() {
     use super_battle_royale::game::map::{CurrentMap, TileMap};
     use super_battle_royale::game::net::NetRole;
     use super_battle_royale::game::player::Player;
-    use super_battle_royale::game::projectile::{Impact, ImpactKind, Projectile, ProjectileOwner};
+    use super_battle_royale::game::projectile::{
+        Impact, ImpactKind, Projectile, ProjectileOwner, ProjectileVelocity,
+    };
+    use super_battle_royale::game::shield::{ShieldPlugin, ShieldState};
     use super_battle_royale::game::state::GameState;
 
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin));
+    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin, ShieldPlugin));
     // The combat systems run only in `Playing`; start there (the default is now Lobby).
     app.insert_state(GameState::Playing);
     app.insert_resource(NetRole::Server);
     app.insert_resource(CurrentMap(TileMap::parse("wsw")));
 
     // Two players on the same spot: the shooter (owner) and the target.
-    let shooter = app.world_mut().spawn((Player, NetPos(Vec2::ZERO))).id();
-    let target = app.world_mut().spawn((Player, NetPos(Vec2::ZERO))).id();
+    let shooter = app
+        .world_mut()
+        .spawn((Player, NetPos(Vec2::ZERO), ShieldState::default()))
+        .id();
+    let target = app
+        .world_mut()
+        .spawn((Player, NetPos(Vec2::ZERO), ShieldState::default()))
+        .id();
 
     // First tick gives both players full health.
     app.update();
-    assert_eq!(app.world().get::<Health>(target).unwrap().current, 100.0);
+    assert_eq!(app.world().get::<Health>(target).unwrap().current, 2.0);
 
-    // Each shot owned by the shooter deals 25 damage to the target only.
-    for expected in [75.0, 50.0, 25.0] {
-        app.world_mut()
-            .spawn((Projectile, ProjectileOwner(shooter), NetPos(Vec2::ZERO)));
-        app.update();
-        assert_eq!(app.world().get::<Health>(target).unwrap().current, expected);
-        assert!(app.world().get::<Dead>(target).is_none());
-    }
+    // A shot owned by the shooter deals 1 damage to the target.
+    app.world_mut().spawn((
+        Projectile,
+        ProjectileOwner(shooter),
+        NetPos(Vec2::ZERO),
+        ProjectileVelocity {
+            horizontal: Vec2::X,
+            vertical: 0.0,
+        },
+    ));
+    app.update();
+    assert_eq!(app.world().get::<Health>(target).unwrap().current, 1.0);
+    assert!(app.world().get::<Dead>(target).is_none());
     assert_eq!(
         app.world().get::<Health>(shooter).unwrap().current,
-        100.0,
+        2.0,
         "a shot must never damage its owner"
     );
 
-    // The fourth shot drops the target to zero and marks it dead.
-    app.world_mut()
-        .spawn((Projectile, ProjectileOwner(shooter), NetPos(Vec2::ZERO)));
+    // The second shot drops the target to zero and marks it dead. The shooter
+    // is already at max health, so heal-on-kill has no visible effect here.
+    app.world_mut().spawn((
+        Projectile,
+        ProjectileOwner(shooter),
+        NetPos(Vec2::ZERO),
+        ProjectileVelocity {
+            horizontal: Vec2::X,
+            vertical: 0.0,
+        },
+    ));
     app.update();
     assert!(
         app.world().get::<Dead>(target).is_some(),
@@ -318,11 +340,14 @@ fn projectile_damages_and_kills_bot() {
     use super_battle_royale::game::map::{CurrentMap, TileMap};
     use super_battle_royale::game::net::NetRole;
     use super_battle_royale::game::player::Player;
-    use super_battle_royale::game::projectile::{Impact, ImpactKind, Projectile, ProjectileOwner};
+    use super_battle_royale::game::projectile::{
+        Impact, ImpactKind, Projectile, ProjectileOwner, ProjectileVelocity,
+    };
+    use super_battle_royale::game::shield::{ShieldPlugin, ShieldState};
     use super_battle_royale::game::state::GameState;
 
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin));
+    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin, ShieldPlugin));
     // The combat systems run only in `Playing`; start there (the default is now Lobby).
     app.insert_state(GameState::Playing);
     app.insert_resource(NetRole::Server);
@@ -332,25 +357,43 @@ fn projectile_damages_and_kills_bot() {
         std::time::Duration::from_secs_f32(1.0 / 60.0),
     ));
 
-    let shooter = app.world_mut().spawn((Player, NetPos(Vec2::ZERO))).id();
-    let bot = app.world_mut().spawn((Bot, NetPos(Vec2::ZERO))).id();
+    let shooter = app
+        .world_mut()
+        .spawn((Player, NetPos(Vec2::ZERO), ShieldState::default()))
+        .id();
+    let bot = app
+        .world_mut()
+        .spawn((Bot, NetPos(Vec2::ZERO), ShieldState::default()))
+        .id();
 
     // First tick gives the bot full health.
     app.update();
-    assert_eq!(app.world().get::<Health>(bot).unwrap().current, 100.0);
+    assert_eq!(app.world().get::<Health>(bot).unwrap().current, 2.0);
 
-    // Each shot owned by the player deals 25 damage to the bot.
-    for expected in [75.0, 50.0, 25.0] {
-        app.world_mut()
-            .spawn((Projectile, ProjectileOwner(shooter), NetPos(Vec2::ZERO)));
-        app.update();
-        assert_eq!(app.world().get::<Health>(bot).unwrap().current, expected);
-        assert!(app.world().get::<Dead>(bot).is_none());
-    }
+    // A shot owned by the player deals 1 damage to the bot.
+    app.world_mut().spawn((
+        Projectile,
+        ProjectileOwner(shooter),
+        NetPos(Vec2::ZERO),
+        ProjectileVelocity {
+            horizontal: Vec2::X,
+            vertical: 0.0,
+        },
+    ));
+    app.update();
+    assert_eq!(app.world().get::<Health>(bot).unwrap().current, 1.0);
+    assert!(app.world().get::<Dead>(bot).is_none());
 
-    // The fourth shot drops the bot to zero and marks it dead.
-    app.world_mut()
-        .spawn((Projectile, ProjectileOwner(shooter), NetPos(Vec2::ZERO)));
+    // The second shot drops the bot to zero and marks it dead.
+    app.world_mut().spawn((
+        Projectile,
+        ProjectileOwner(shooter),
+        NetPos(Vec2::ZERO),
+        ProjectileVelocity {
+            horizontal: Vec2::X,
+            vertical: 0.0,
+        },
+    ));
     app.update();
     assert!(
         app.world().get::<Dead>(bot).is_some(),
@@ -376,8 +419,309 @@ fn projectile_damages_and_kills_bot() {
     );
     assert_eq!(
         app.world().get::<Health>(bot).unwrap().current,
-        100.0,
+        2.0,
         "bot should respawn with full health"
+    );
+}
+
+/// A shot that hits a shield raised in the same frame is reflected (parry).
+/// The reflector becomes the new owner and the original target takes no damage.
+#[test]
+fn shield_parry_reflects_projectile() {
+    use super_battle_royale::game::combat::{CombatPlugin, Health};
+    use super_battle_royale::game::map::{CurrentMap, TileMap};
+    use super_battle_royale::game::net::NetRole;
+    use super_battle_royale::game::player::Player;
+    use super_battle_royale::game::projectile::{
+        Impact, ImpactKind, Projectile, ProjectileOwner, ProjectileVelocity,
+    };
+    use super_battle_royale::game::shield::{ShieldPlugin, ShieldState};
+    use super_battle_royale::game::state::GameState;
+
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin, ShieldPlugin));
+    app.insert_state(GameState::Playing);
+    app.insert_resource(NetRole::Server);
+    app.insert_resource(CurrentMap(TileMap::parse("wsw")));
+
+    let attacker = app
+        .world_mut()
+        .spawn((Player, NetPos(Vec2::ZERO), ShieldState::default()))
+        .id();
+    let defender = app
+        .world_mut()
+        .spawn((Player, NetPos(Vec2::ZERO), ShieldState::default()))
+        .id();
+
+    // First tick grants health.
+    app.update();
+
+    // Raise the defender's shield and fire a shot in the same frame.
+    app.world_mut()
+        .get_mut::<ShieldState>(defender)
+        .unwrap()
+        .requested = true;
+    let projectile = app
+        .world_mut()
+        .spawn((
+            Projectile,
+            ProjectileOwner(attacker),
+            NetPos(Vec2::ZERO),
+            ProjectileVelocity {
+                horizontal: Vec2::X,
+                vertical: 0.0,
+            },
+        ))
+        .id();
+
+    app.update();
+
+    // Defender is unharmed.
+    assert_eq!(app.world().get::<Health>(defender).unwrap().current, 2.0);
+
+    // Projectile still exists and is now owned by the defender.
+    assert!(app.world().get::<Projectile>(projectile).is_some());
+    assert_eq!(
+        app.world().get::<ProjectileOwner>(projectile).unwrap().0,
+        defender
+    );
+
+    // A parry impact was spawned.
+    let mut impacts = app.world_mut().query::<&Impact>();
+    assert!(
+        impacts
+            .iter(app.world())
+            .any(|impact| impact.0 == ImpactKind::Parry),
+        "a parry should spawn a Parry impact"
+    );
+}
+
+/// A shot that hits a shield raised earlier is blocked (destroyed) and deals no
+/// damage.
+#[test]
+fn shield_blocks_after_parry_window() {
+    use super_battle_royale::game::combat::{CombatPlugin, Health};
+    use super_battle_royale::game::map::{CurrentMap, TileMap};
+    use super_battle_royale::game::net::NetRole;
+    use super_battle_royale::game::player::Player;
+    use super_battle_royale::game::projectile::{
+        Impact, ImpactKind, Projectile, ProjectileOwner, ProjectileVelocity,
+    };
+    use super_battle_royale::game::shield::{ShieldPlugin, ShieldState};
+    use super_battle_royale::game::state::GameState;
+
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin, ShieldPlugin));
+    app.insert_state(GameState::Playing);
+    app.insert_resource(NetRole::Server);
+    app.insert_resource(CurrentMap(TileMap::parse("wsw")));
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        std::time::Duration::from_secs_f32(1.0 / 60.0),
+    ));
+
+    let attacker = app
+        .world_mut()
+        .spawn((Player, NetPos(Vec2::ZERO), ShieldState::default()))
+        .id();
+    let defender = app
+        .world_mut()
+        .spawn((Player, NetPos(Vec2::ZERO), ShieldState::default()))
+        .id();
+
+    app.update();
+
+    // Raise shield and wait long enough for the parry window to close.
+    app.world_mut()
+        .get_mut::<ShieldState>(defender)
+        .unwrap()
+        .requested = true;
+    for _ in 0..30 {
+        app.update();
+    }
+
+    let projectile = app
+        .world_mut()
+        .spawn((
+            Projectile,
+            ProjectileOwner(attacker),
+            NetPos(Vec2::ZERO),
+            ProjectileVelocity {
+                horizontal: Vec2::X,
+                vertical: 0.0,
+            },
+        ))
+        .id();
+    app.update();
+
+    assert_eq!(app.world().get::<Health>(defender).unwrap().current, 2.0);
+    assert!(app.world().get::<Projectile>(projectile).is_none());
+
+    let mut impacts = app.world_mut().query::<&Impact>();
+    assert!(
+        impacts
+            .iter(app.world())
+            .any(|impact| impact.0 == ImpactKind::Shield),
+        "a block should spawn a Shield impact"
+    );
+}
+
+/// Killing a target heals the shooter by 1 HP, capped at max health.
+#[test]
+fn kill_heals_owner_by_one() {
+    use super_battle_royale::game::combat::{CombatPlugin, Dead, Health};
+    use super_battle_royale::game::map::{CurrentMap, TileMap};
+    use super_battle_royale::game::net::NetRole;
+    use super_battle_royale::game::player::Player;
+    use super_battle_royale::game::projectile::{Projectile, ProjectileOwner, ProjectileVelocity};
+    use super_battle_royale::game::shield::{ShieldPlugin, ShieldState};
+    use super_battle_royale::game::state::GameState;
+
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin, ShieldPlugin));
+    app.insert_state(GameState::Playing);
+    app.insert_resource(NetRole::Server);
+    app.insert_resource(CurrentMap(TileMap::parse("wsw")));
+
+    let shooter = app
+        .world_mut()
+        .spawn((Player, NetPos(Vec2::ZERO), ShieldState::default()))
+        .id();
+    let target = app
+        .world_mut()
+        .spawn((Player, NetPos(Vec2::ZERO), ShieldState::default()))
+        .id();
+
+    app.update();
+
+    // Wound both actors: the shot will kill the target and the heal should
+    // bring the shooter back to full.
+    app.world_mut().get_mut::<Health>(shooter).unwrap().current = 1.0;
+    app.world_mut().get_mut::<Health>(target).unwrap().current = 1.0;
+
+    app.world_mut().spawn((
+        Projectile,
+        ProjectileOwner(shooter),
+        NetPos(Vec2::ZERO),
+        ProjectileVelocity {
+            horizontal: Vec2::X,
+            vertical: 0.0,
+        },
+    ));
+    app.update();
+
+    assert_eq!(
+        app.world().get::<Health>(shooter).unwrap().current,
+        2.0,
+        "shooter should heal to max on kill"
+    );
+    assert!(
+        app.world().get::<Dead>(target).is_some(),
+        "target should be killed"
+    );
+
+    // A second killing shot should not overheal the shooter.
+    app.world_mut().spawn((
+        Projectile,
+        ProjectileOwner(shooter),
+        NetPos(Vec2::ZERO),
+        ProjectileVelocity {
+            horizontal: Vec2::X,
+            vertical: 0.0,
+        },
+    ));
+    app.update();
+    assert_eq!(app.world().get::<Health>(shooter).unwrap().current, 2.0);
+}
+
+/// A freshly-spawned player is invulnerable for 2 seconds and ignores shots,
+/// then takes damage normally once the protection expires.
+#[test]
+fn spawn_invulnerability_protects_for_two_seconds() {
+    use bevy::time::{Timer, TimerMode};
+    use super_battle_royale::game::combat::{CombatPlugin, Health, SpawnInvulnerability};
+    use super_battle_royale::game::map::{CurrentMap, TileMap};
+    use super_battle_royale::game::net::NetRole;
+    use super_battle_royale::game::player::Player;
+    use super_battle_royale::game::projectile::{Projectile, ProjectileOwner, ProjectileVelocity};
+    use super_battle_royale::game::shield::{ShieldPlugin, ShieldState};
+    use super_battle_royale::game::state::GameState;
+
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin, ShieldPlugin));
+    app.insert_state(GameState::Playing);
+    app.insert_resource(NetRole::Server);
+    app.insert_resource(CurrentMap(TileMap::parse("wsw")));
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        std::time::Duration::from_secs_f32(1.0 / 60.0),
+    ));
+
+    let shooter = app
+        .world_mut()
+        .spawn((Player, NetPos(Vec2::ZERO), ShieldState::default()))
+        .id();
+    let target = app
+        .world_mut()
+        .spawn((Player, NetPos(Vec2::ZERO), ShieldState::default()))
+        .id();
+
+    // First tick grants health; manually add spawn invulnerability as the real
+    // spawn functions would.
+    app.update();
+    app.world_mut()
+        .entity_mut(target)
+        .insert(SpawnInvulnerability(Timer::from_seconds(
+            2.0,
+            TimerMode::Once,
+        )));
+    assert_eq!(app.world().get::<Health>(target).unwrap().current, 2.0);
+
+    // Fire immediately: invulnerability should absorb the shot.
+    app.world_mut().spawn((
+        Projectile,
+        ProjectileOwner(shooter),
+        NetPos(Vec2::ZERO),
+        ProjectileVelocity {
+            horizontal: Vec2::X,
+            vertical: 0.0,
+        },
+    ));
+    app.update();
+    assert_eq!(
+        app.world().get::<Health>(target).unwrap().current,
+        2.0,
+        "spawn-invulnerable target should take no damage"
+    );
+
+    // Remove the ignored projectile so it cannot hit later.
+    for entity in app
+        .world_mut()
+        .query_filtered::<Entity, With<Projectile>>()
+        .iter(app.world())
+        .collect::<Vec<_>>()
+    {
+        app.world_mut().entity_mut(entity).despawn();
+    }
+
+    // Step past the 2-second invulnerability window.
+    for _ in 0..130 {
+        app.update();
+    }
+
+    // Now a shot should deal damage.
+    app.world_mut().spawn((
+        Projectile,
+        ProjectileOwner(shooter),
+        NetPos(Vec2::ZERO),
+        ProjectileVelocity {
+            horizontal: Vec2::X,
+            vertical: 0.0,
+        },
+    ));
+    app.update();
+    assert_eq!(
+        app.world().get::<Health>(target).unwrap().current,
+        1.0,
+        "target should take damage once invulnerability expires"
     );
 }
 

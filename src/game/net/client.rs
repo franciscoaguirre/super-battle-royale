@@ -15,7 +15,7 @@ use bevy_replicon_renet::{
     renet::ConnectionConfig,
 };
 
-use super::{PlayerInput, ShootRequest, protocol_id_for, register_protocol};
+use super::{PlayerInput, ShieldRequest, ShootRequest, protocol_id_for, register_protocol};
 use crate::game::player::input_direction;
 use crate::game::state::GameState;
 
@@ -44,7 +44,7 @@ impl Plugin for ClientNetPlugin {
             // Only send input once connected and the match is actually underway.
             .add_systems(
                 Update,
-                (send_input, send_shoot_request)
+                (send_input, send_shoot_request, send_shield_request)
                     .run_if(in_state(ClientState::Connected))
                     .run_if(in_state(GameState::Playing)),
             );
@@ -97,5 +97,19 @@ fn send_input(mut commands: Commands, input: Res<ButtonInput<KeyCode>>) {
 fn send_shoot_request(mut commands: Commands, input: Res<ButtonInput<KeyCode>>) {
     if input.just_pressed(KeyCode::Space) {
         commands.client_trigger(ShootRequest);
+    }
+}
+
+/// Sends shield press/release events only on state changes. The server mirrors
+/// this into the player's [`ShieldState::requested`] flag.
+fn send_shield_request(
+    mut commands: Commands,
+    input: Res<ButtonInput<KeyCode>>,
+    mut last: Local<bool>,
+) {
+    let pressed = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
+    if pressed != *last {
+        commands.client_trigger(ShieldRequest { active: pressed });
+        *last = pressed;
     }
 }

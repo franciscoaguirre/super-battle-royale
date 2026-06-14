@@ -5,6 +5,7 @@ pub mod music;
 pub mod net;
 pub mod player;
 pub mod projectile;
+pub mod shield;
 pub mod state;
 
 // Rendering-only subsystems live in the windowed client; the headless server
@@ -46,6 +47,7 @@ impl Plugin for GamePlugin {
                 map::MapPlugin,
                 player::PlayerPlugin,
                 projectile::ProjectilePlugin,
+                shield::ShieldPlugin,
             ))
             .add_systems(OnExit(GameState::Playing), cleanup_ingame);
 

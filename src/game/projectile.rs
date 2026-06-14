@@ -1,13 +1,12 @@
-//! Shooting: straight-flying, slowly-falling projectiles.
+//! Shooting: straight-flying projectiles.
 //!
 //! Press Space to fire a shot in the player's last-moved direction. The shot
-//! travels at a constant horizontal speed while its altitude ([`Height`]) sinks
-//! under gentle gravity — no upward lob — and it "crashes" (despawns) once the
-//! altitude reaches the ground. PvP damage on contact lives in `combat.rs`.
+//! travels at a constant horizontal speed and altitude. PvP damage, shield
+//! blocks, and parries live in `combat.rs`.
 //!
 //! Like every dynamic entity, a projectile's ground position lives in [`NetPos`]
-//! and replicates; its altitude replicates via [`Height`] so clients can draw the
-//! descent; its velocity is server/sim-only. Firing and motion run on the
+//! and replicates; its altitude replicates via [`Height`] so clients can draw it
+//! above the floor; its velocity is server/sim-only. Firing and motion run on the
 //! authoritative side (offline + server); rendering runs on the client.
 
 use bevy::prelude::*;
@@ -27,14 +26,9 @@ use super::net::is_offline;
 
 /// Constant horizontal speed of a shot, in world units per second.
 const PROJECTILE_SPEED: f32 = 360.0;
-/// Downward acceleration applied to a shot's altitude. Deliberately small so the
-/// shot flies nearly straight and sinks gradually.
-const GRAVITY: f32 = 60.0;
-/// Altitude a shot starts at (vertical velocity starts at zero). Kept low so the
-/// shot leaves around the player's body rather than above their head.
+/// Altitude a shot starts at and maintains. Kept low so the shot leaves around
+/// the player's body rather than above their head.
 const INITIAL_HEIGHT: f32 = 12.0;
-/// A shot crashes once its altitude reaches this "ground" level.
-const GROUND_LEVEL: f32 = 0.0;
 /// Minimum seconds between shots from one player.
 const FIRE_COOLDOWN: f32 = 0.35;
 /// Collision radius of a shot, used for PvP hit detection (shared with the
@@ -121,8 +115,12 @@ pub enum ImpactKind {
     /// Crashed into the ground.
     #[default]
     Ground,
-    /// Struck a player.
+    /// Struck a player or bot.
     Object,
+    /// Was blocked by a raised shield (after the parry window).
+    Shield,
+    /// Was reflected by a perfectly-timed shield parry.
+    Parry,
 }
 
 /// A short-lived, replicated marker spawned where a shot ended. Clients play the
@@ -222,8 +220,9 @@ pub(crate) fn tick_cooldowns(time: Res<Time>, mut query: Query<&mut FireCooldown
     }
 }
 
-/// Moves shots forward, sinks them under gravity, and despawns them when they
-/// crash into the ground or leave the arena.
+/// Moves shots forward at constant height and despawns them when they hit a
+/// wall or leave the arena. Shots no longer fall under gravity so they stay on
+/// a straight horizontal path, which makes reflected parries readable.
 fn simulate_projectiles(
     time: Res<Time>,
     bounds: Res<ArenaBounds>,
@@ -234,14 +233,15 @@ fn simulate_projectiles(
     let dt = time.delta_secs();
     for (entity, mut pos, mut height, mut velocity) in &mut query {
         pos.0 += velocity.horizontal * dt;
-        velocity.vertical -= GRAVITY * dt;
-        height.0 += velocity.vertical * dt;
+        // Keep altitude fixed; gravity was removed for straight-flight readability.
+        height.0 = INITIAL_HEIGHT;
+        velocity.vertical = 0.0;
 
         let p = pos.0;
         let out_of_bounds =
             p.x < bounds.min.x || p.x > bounds.max.x || p.y < bounds.min.y || p.y > bounds.max.y;
         let hit_wall = map.0.circle_intersects_wall(p, PROJECTILE_RADIUS);
-        if height.0 <= GROUND_LEVEL || hit_wall {
+        if hit_wall {
             spawn_impact(&mut commands, ImpactKind::Ground, pos.0);
             commands.entity(entity).despawn();
         } else if out_of_bounds {
@@ -319,7 +319,11 @@ fn offline_shoot(
     mut commands: Commands,
     mut players: Query<
         (Entity, &NetPos, &Facing, &mut FireCooldown, &PlayerColor),
-        (With<Player>, Without<Dead>),
+        (
+            With<Player>,
+            Without<Dead>,
+            Without<super::shield::Shielding>,
+        ),
     >,
 ) {
     if !keys.just_pressed(KeyCode::Space) {
@@ -440,7 +444,8 @@ fn play_impact_sounds(
     for impact in &impacts {
         let path = match impact.0 {
             ImpactKind::Ground => HIT_GROUND_SOUND,
-            ImpactKind::Object => HIT_OBJECT_SOUND,
+            ImpactKind::Object | ImpactKind::Shield => HIT_OBJECT_SOUND,
+            ImpactKind::Parry => SHOOT_SOUND,
         };
         play_sound(&mut commands, &asset_server, path);
     }
