@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::enemy::{Enemy, EnemyIntent};
+use super::bot::{Bot, BotIntent};
 use super::map::{ArenaBounds, CurrentMap};
 use super::net::{NetPos, is_authoritative};
 use super::player::{Player, PlayerColor, PlayerIntent};
@@ -177,13 +177,13 @@ impl Plugin for ProjectilePlugin {
     }
 }
 
-/// Gives authoritative players and enemies their shooting components
+/// Gives authoritative players and bots their shooting components
 /// (idempotent, so it covers offline spawns, server-spawned players, and
-/// replicated-in enemies).
+/// replicated-in bots).
 #[allow(clippy::type_complexity)]
 pub(crate) fn ensure_shooting_components(
     mut commands: Commands,
-    entities: Query<Entity, (Or<(With<Player>, With<Enemy>)>, Without<FireCooldown>)>,
+    entities: Query<Entity, (Or<(With<Player>, With<Bot>)>, Without<FireCooldown>)>,
 ) {
     for entity in &entities {
         let mut timer = Timer::from_seconds(FIRE_COOLDOWN, TimerMode::Once);
@@ -195,13 +195,13 @@ pub(crate) fn ensure_shooting_components(
     }
 }
 
-/// Tracks each player's last-moved direction and each enemy's current intent
+/// Tracks each player's last-moved direction and each bot's current intent
 /// as their firing direction.
 #[allow(clippy::type_complexity)]
 fn update_facing(
     mut actors: ParamSet<(
         Query<(&PlayerIntent, &mut Facing), With<Player>>,
-        Query<(&EnemyIntent, &mut Facing), With<Enemy>>,
+        Query<(&BotIntent, &mut Facing), With<Bot>>,
     )>,
 ) {
     for (intent, mut facing) in actors.p0() {

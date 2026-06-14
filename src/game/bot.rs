@@ -9,46 +9,46 @@ use super::player::PlayerColor;
 use super::projectile::{Facing, FireCooldown, tick_cooldowns, try_fire};
 use super::state::GameState;
 
-pub const ENEMY_SIZE: f32 = 32.0;
-const ENEMY_SPEED: f32 = 180.0;
-const ENEMY_DETECTION_RANGE: f32 = 500.0;
-const ENEMY_FIRE_RANGE: f32 = 280.0;
-const ENEMY_AIM_THRESHOLD: f32 = 0.95;
+pub const BOT_SIZE: f32 = 32.0;
+const BOT_SPEED: f32 = 180.0;
+const BOT_DETECTION_RANGE: f32 = 500.0;
+const BOT_FIRE_RANGE: f32 = 280.0;
+const BOT_AIM_THRESHOLD: f32 = 0.95;
 
-/// Marker for an enemy. Replicated so clients know which entities to draw as
-/// enemies; the AI state and intent stay server-side.
+/// Marker for an bot. Replicated so clients know which entities to draw as
+/// bots; the AI state and intent stay server-side.
 #[derive(Component, Serialize, Deserialize, Debug, Clone, Copy, Default)]
-pub struct Enemy;
+pub struct Bot;
 
-/// Server-only AI state: which player the enemy is currently hunting and which
+/// Server-only AI state: which player the bot is currently hunting and which
 /// direction it wanders when no target is visible.
 #[derive(Component, Debug, Clone, Copy)]
-pub struct EnemyAI {
+pub struct BotAI {
     target: Option<Entity>,
     wander: Vec2,
 }
 
 /// Server-only desired movement direction, analogous to [`PlayerIntent`].
 #[derive(Component, Debug, Clone, Copy, Default)]
-pub struct EnemyIntent(pub Vec2);
+pub struct BotIntent(pub Vec2);
 
-pub struct EnemyPlugin;
+pub struct BotPlugin;
 
-impl Plugin for EnemyPlugin {
+impl Plugin for BotPlugin {
     fn build(&self, app: &mut App) {
         // Enemies are simulated wherever we're authoritative (server or offline).
         app.add_systems(
             OnEnter(GameState::Playing),
-            spawn_enemies.run_if(is_authoritative),
+            spawn_bots.run_if(is_authoritative),
         )
         .add_systems(
             Update,
             (
-                select_enemy_targets,
-                update_enemy_intent,
-                apply_enemy_intent,
-                update_enemy_facing,
-                enemy_shoot.after(tick_cooldowns),
+                select_bot_targets,
+                update_bot_intent,
+                apply_bot_intent,
+                update_bot_facing,
+                bot_shoot.after(tick_cooldowns),
             )
                 .chain()
                 .run_if(in_state(GameState::Playing))
@@ -58,14 +58,14 @@ impl Plugin for EnemyPlugin {
         #[cfg(feature = "client")]
         app.add_systems(
             Update,
-            attach_enemy_sprite.run_if(in_state(GameState::Playing)),
+            attach_bot_sprite.run_if(in_state(GameState::Playing)),
         );
     }
 }
 
-/// Spawns the authoritative enemy entities. `Replicated` is inert offline (no
+/// Spawns the authoritative bot entities. `Replicated` is inert offline (no
 /// server running) and drives replication on the dedicated server.
-fn spawn_enemies(mut commands: Commands, map: Res<CurrentMap>) {
+fn spawn_bots(mut commands: Commands, map: Res<CurrentMap>) {
     let spawns = map.0.spawn_points();
     let count = 3;
 
@@ -73,17 +73,17 @@ fn spawn_enemies(mut commands: Commands, map: Res<CurrentMap>) {
         let pos = if spawns.is_empty() {
             Vec2::ZERO
         } else {
-            // Offset enemy spawns so they don't all start on top of player 0.
+            // Offset bot spawns so they don't all start on top of player 0.
             spawns[(i + 1) % spawns.len()]
         };
 
         commands.spawn((
-            Enemy,
-            EnemyAI {
+            Bot,
+            BotAI {
                 target: None,
                 wander: Vec2::new(0.6, 0.8).normalize(),
             },
-            EnemyIntent::default(),
+            BotIntent::default(),
             PlayerColor::Red,
             NetPos(pos),
             Replicated,
@@ -92,22 +92,22 @@ fn spawn_enemies(mut commands: Commands, map: Res<CurrentMap>) {
     }
 }
 
-/// Each live enemy picks the nearest live player as its target.
+/// Each live bot picks the nearest live player as its target.
 #[allow(clippy::type_complexity)]
-fn select_enemy_targets(
-    mut enemies: Query<(Entity, &NetPos, &mut EnemyAI), (With<Enemy>, Without<Dead>)>,
+fn select_bot_targets(
+    mut bots: Query<(Entity, &NetPos, &mut BotAI), (With<Bot>, Without<Dead>)>,
     players: Query<(Entity, &NetPos), (With<super::player::Player>, Without<Dead>)>,
 ) {
-    for (enemy_entity, enemy_pos, mut ai) in &mut enemies {
+    for (bot_entity, bot_pos, mut ai) in &mut bots {
         let mut nearest = None;
-        let mut nearest_dist = ENEMY_DETECTION_RANGE * ENEMY_DETECTION_RANGE;
+        let mut nearest_dist = BOT_DETECTION_RANGE * BOT_DETECTION_RANGE;
 
         for (player_entity, player_pos) in &players {
-            // Don't target yourself (relevant if enemies ever get a Player tag).
-            if player_entity == enemy_entity {
+            // Don't target yourself (relevant if bots ever get a Player tag).
+            if player_entity == bot_entity {
                 continue;
             }
-            let dist_sq = enemy_pos.0.distance_squared(player_pos.0);
+            let dist_sq = bot_pos.0.distance_squared(player_pos.0);
             if dist_sq < nearest_dist {
                 nearest_dist = dist_sq;
                 nearest = Some(player_entity);
@@ -118,22 +118,22 @@ fn select_enemy_targets(
     }
 }
 
-/// Sets the enemy's movement intent. When hunting, move straight toward the
+/// Sets the bot's movement intent. When hunting, move straight toward the
 /// target; otherwise bounce around the arena like a patrol.
 #[allow(clippy::type_complexity)]
-fn update_enemy_intent(
+fn update_bot_intent(
     time: Res<Time>,
     bounds: Res<ArenaBounds>,
-    mut enemies: Query<(&NetPos, &mut EnemyAI, &mut EnemyIntent), (With<Enemy>, Without<Dead>)>,
+    mut bots: Query<(&NetPos, &mut BotAI, &mut BotIntent), (With<Bot>, Without<Dead>)>,
     players: Query<&NetPos, (With<super::player::Player>, Without<Dead>)>,
 ) {
-    let half = ENEMY_SIZE / 2.0;
+    let half = BOT_SIZE / 2.0;
     let min_x = bounds.min.x + half;
     let max_x = bounds.max.x - half;
     let min_y = bounds.min.y + half;
     let max_y = bounds.max.y - half;
 
-    for (pos, mut ai, mut intent) in &mut enemies {
+    for (pos, mut ai, mut intent) in &mut bots {
         if let Some(target) = ai.target {
             if let Ok(target_pos) = players.get(target) {
                 let to_target = target_pos.0 - pos.0;
@@ -144,7 +144,7 @@ fn update_enemy_intent(
         }
 
         // No target: wander and bounce off the outer arena walls.
-        let next = pos.0 + ai.wander * ENEMY_SPEED * time.delta_secs();
+        let next = pos.0 + ai.wander * BOT_SPEED * time.delta_secs();
 
         if next.x < min_x || next.x > max_x {
             ai.wander.x *= -1.0;
@@ -157,19 +157,19 @@ fn update_enemy_intent(
     }
 }
 
-/// Advances every enemy's authoritative position from its intent, sliding along
+/// Advances every bot's authoritative position from its intent, sliding along
 /// map walls and clamped to the arena. Mirrors [`apply_player_intent`].
 #[allow(clippy::type_complexity)]
-fn apply_enemy_intent(
+fn apply_bot_intent(
     time: Res<Time>,
     bounds: Res<ArenaBounds>,
     map: Res<CurrentMap>,
-    mut query: Query<(&mut NetPos, &EnemyIntent), (With<Enemy>, Without<Dead>)>,
+    mut query: Query<(&mut NetPos, &BotIntent), (With<Bot>, Without<Dead>)>,
 ) {
-    let half = ENEMY_SIZE / 2.0;
+    let half = BOT_SIZE / 2.0;
     for (mut pos, intent) in &mut query {
         let dir = intent.0.clamp_length_max(1.0);
-        let desired = pos.0 + dir * ENEMY_SPEED * time.delta_secs();
+        let desired = pos.0 + dir * BOT_SPEED * time.delta_secs();
 
         let mut next = pos.0;
         let candidate_x = Vec2::new(desired.x, next.y);
@@ -185,9 +185,9 @@ fn apply_enemy_intent(
     }
 }
 
-/// Keeps the enemy's facing aligned with its movement intent so shots fly in
+/// Keeps the bot's facing aligned with its movement intent so shots fly in
 /// the direction it is moving.
-fn update_enemy_facing(mut query: Query<(&EnemyIntent, &mut Facing), With<Enemy>>) {
+fn update_bot_facing(mut query: Query<(&BotIntent, &mut Facing), With<Bot>>) {
     for (intent, mut facing) in &mut query {
         if intent.0 != Vec2::ZERO {
             facing.0 = intent.0.normalize_or_zero();
@@ -195,25 +195,25 @@ fn update_enemy_facing(mut query: Query<(&EnemyIntent, &mut Facing), With<Enemy>
     }
 }
 
-/// Fires a shot when a target is within range and the enemy is roughly aiming
+/// Fires a shot when a target is within range and the bot is roughly aiming
 /// at it. Respects the same fire cooldown as players.
 #[allow(clippy::type_complexity)]
-fn enemy_shoot(
+fn bot_shoot(
     mut commands: Commands,
-    enemies: Query<
+    bots: Query<
         (
             Entity,
             &NetPos,
             &Facing,
             &mut FireCooldown,
             &PlayerColor,
-            &EnemyAI,
+            &BotAI,
         ),
-        (With<Enemy>, Without<Dead>),
+        (With<Bot>, Without<Dead>),
     >,
     players: Query<&NetPos, (With<super::player::Player>, Without<Dead>)>,
 ) {
-    for (entity, pos, facing, mut cooldown, color, ai) in enemies {
+    for (entity, pos, facing, mut cooldown, color, ai) in bots {
         let Some(target) = ai.target else {
             continue;
         };
@@ -222,12 +222,12 @@ fn enemy_shoot(
         };
 
         let to_target = target_pos.0 - pos.0;
-        if to_target.length_squared() > ENEMY_FIRE_RANGE * ENEMY_FIRE_RANGE {
+        if to_target.length_squared() > BOT_FIRE_RANGE * BOT_FIRE_RANGE {
             continue;
         }
 
         let aim = to_target.normalize_or_zero();
-        if aim.dot(facing.0) < ENEMY_AIM_THRESHOLD {
+        if aim.dot(facing.0) < BOT_AIM_THRESHOLD {
             continue;
         }
 
@@ -235,20 +235,20 @@ fn enemy_shoot(
     }
 }
 
-/// Gives any enemy entity without a sprite (offline-spawned or replicated in)
+/// Gives any bot entity without a sprite (offline-spawned or replicated in)
 /// its red-sphere visual.
 #[cfg(feature = "client")]
 #[allow(clippy::type_complexity)]
-fn attach_enemy_sprite(
+fn attach_bot_sprite(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
-    query: Query<(Entity, &NetPos), (With<Enemy>, Without<Sprite>)>,
+    query: Query<(Entity, &NetPos), (With<Bot>, Without<Sprite>)>,
 ) {
     for (entity, pos) in &query {
         commands.entity(entity).insert((
             Sprite {
                 image: asset_server.load("sphere_gray.png"),
-                custom_size: Some(Vec2::splat(ENEMY_SIZE)),
+                custom_size: Some(Vec2::splat(BOT_SIZE)),
                 ..default()
             },
             Transform::from_xyz(pos.0.x, pos.0.y, 10.0),

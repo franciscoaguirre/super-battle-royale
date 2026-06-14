@@ -1,7 +1,7 @@
 //! Server-side networking: accepts connections, spawns an authoritative player
 //! per client, and applies the input it receives.
 //!
-//! Enemies are spawned by the regular [`EnemyPlugin`](crate::game::enemy) on the
+//! Enemies are spawned by the regular [`BotPlugin`](crate::game::bot) on the
 //! authoritative side, so this module only deals with players and transport.
 
 use std::net::{SocketAddr, UdpSocket};

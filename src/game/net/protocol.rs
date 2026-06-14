@@ -9,7 +9,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-/// Authoritative world-space position of a dynamic entity (player or enemy).
+/// Authoritative world-space position of a dynamic entity (player or bot).
 ///
 /// This is the single source of truth for position in *all* modes: the server
 /// (and offline single-player) write it from simulation, online clients receive

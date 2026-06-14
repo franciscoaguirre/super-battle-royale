@@ -1,14 +1,14 @@
-//! Combat: shots damage players and enemies, who die and respawn.
+//! Combat: shots damage players and bots, who die and respawn.
 //!
-//! Both human players and AI enemies take damage from projectiles they do not
+//! Both human players and AI bots take damage from projectiles they do not
 //! own. Health and respawn timing are server/sim-only; a small replicated
-//! [`Dead`] marker lets clients hide a player or enemy during their respawn
+//! [`Dead`] marker lets clients hide a player or bot during their respawn
 //! delay. Everything here runs on the authoritative side (server + offline).
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::enemy::Enemy;
+use super::bot::Bot;
 use super::map::CurrentMap;
 use super::net::{NetPos, is_authoritative};
 use super::player::{PLAYER_SIZE, Player};
@@ -40,12 +40,12 @@ impl Health {
     }
 }
 
-/// Replicated marker present while a player or enemy is dead and awaiting
+/// Replicated marker present while a player or bot is dead and awaiting
 /// respawn, so clients can hide them.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
 pub struct Dead;
 
-/// Server/sim-only countdown until a dead player or enemy respawns.
+/// Server/sim-only countdown until a dead player or bot respawns.
 #[derive(Component)]
 struct RespawnTimer(Timer);
 
@@ -68,7 +68,7 @@ impl Plugin for CombatPlugin {
                 .run_if(is_authoritative),
         );
 
-        // Client: hide players and enemies that are currently dead.
+        // Client: hide players and bots that are currently dead.
         #[cfg(feature = "client")]
         app.add_systems(
             Update,
@@ -77,20 +77,20 @@ impl Plugin for CombatPlugin {
     }
 }
 
-/// Gives any player or enemy without health a full bar (covers offline + server
+/// Gives any player or bot without health a full bar (covers offline + server
 /// spawns).
 #[allow(clippy::type_complexity)]
 fn ensure_health(
     mut commands: Commands,
-    entities: Query<Entity, (Or<(With<Player>, With<Enemy>)>, Without<Health>)>,
+    entities: Query<Entity, (Or<(With<Player>, With<Bot>)>, Without<Health>)>,
 ) {
     for entity in &entities {
         commands.entity(entity).insert(Health::full());
     }
 }
 
-/// Damages the first live, non-owner player or enemy a shot touches, then
-/// despawns it. Players are checked before enemies so a shot never "passes
+/// Damages the first live, non-owner player or bot a shot touches, then
+/// despawns it. Players are checked before bots so a shot never "passes
 /// through" a player to hit a bot behind them.
 #[allow(clippy::type_complexity)]
 fn apply_projectile_hits(
@@ -98,7 +98,7 @@ fn apply_projectile_hits(
     projectiles: Query<(Entity, &NetPos, &ProjectileOwner), With<Projectile>>,
     mut targets: ParamSet<(
         Query<(Entity, &NetPos, &mut Health), (With<Player>, Without<Dead>)>,
-        Query<(Entity, &NetPos, &mut Health), (With<Enemy>, Without<Dead>)>,
+        Query<(Entity, &NetPos, &mut Health), (With<Bot>, Without<Dead>)>,
     )>,
 ) {
     for (projectile, projectile_pos, owner) in &projectiles {
@@ -121,13 +121,13 @@ fn apply_projectile_hits(
             continue;
         }
 
-        for (enemy, enemy_pos, mut health) in targets.p1() {
-            if enemy == owner.0 {
+        for (bot, bot_pos, mut health) in targets.p1() {
+            if bot == owner.0 {
                 continue;
             }
-            if projectile_pos.0.distance(enemy_pos.0) <= HIT_RADIUS {
+            if projectile_pos.0.distance(bot_pos.0) <= HIT_RADIUS {
                 health.current -= PROJECTILE_DAMAGE;
-                spawn_impact(&mut commands, ImpactKind::Object, enemy_pos.0);
+                spawn_impact(&mut commands, ImpactKind::Object, bot_pos.0);
                 hit = true;
                 break;
             }
@@ -139,12 +139,12 @@ fn apply_projectile_hits(
     }
 }
 
-/// Marks players or enemies whose health has run out as dead and starts their
+/// Marks players or bots whose health has run out as dead and starts their
 /// respawn timer.
 #[allow(clippy::type_complexity)]
 fn handle_deaths(
     mut commands: Commands,
-    entities: Query<(Entity, &Health), (Or<(With<Player>, With<Enemy>)>, Without<Dead>)>,
+    entities: Query<(Entity, &Health), (Or<(With<Player>, With<Bot>)>, Without<Dead>)>,
 ) {
     for (entity, health) in &entities {
         if health.current <= 0.0 {
@@ -156,7 +156,7 @@ fn handle_deaths(
     }
 }
 
-/// Respawns dead players or enemies once their timer elapses: relocate to a
+/// Respawns dead players or bots once their timer elapses: relocate to a
 /// spawn point, refill health, and clear the dead state.
 #[allow(clippy::type_complexity)]
 fn tick_respawns(
@@ -165,7 +165,7 @@ fn tick_respawns(
     mut commands: Commands,
     mut entities: Query<
         (Entity, &mut NetPos, &mut Health, &mut RespawnTimer),
-        Or<(With<Player>, With<Enemy>)>,
+        Or<(With<Player>, With<Bot>)>,
     >,
 ) {
     for (entity, mut pos, mut health, mut timer) in &mut entities {
@@ -180,11 +180,11 @@ fn tick_respawns(
     }
 }
 
-/// Hides dead players and enemies (and shows live ones) on the client.
+/// Hides dead players and bots (and shows live ones) on the client.
 #[cfg(feature = "client")]
 #[allow(clippy::type_complexity)]
 fn hide_dead_entities(
-    mut entities: Query<(&mut Visibility, Has<Dead>), Or<(With<Player>, With<Enemy>)>>,
+    mut entities: Query<(&mut Visibility, Has<Dead>), Or<(With<Player>, With<Bot>)>>,
 ) {
     for (mut visibility, dead) in &mut entities {
         *visibility = if dead {

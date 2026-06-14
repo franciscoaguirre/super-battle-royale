@@ -1,11 +1,11 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "client")]
+use super::bot::Bot;
 use super::combat::Dead;
 #[cfg(feature = "client")]
 use super::combat::Health;
-#[cfg(feature = "client")]
-use super::enemy::Enemy;
 use super::map::{ArenaBounds, CurrentMap};
 use super::net::{NetPos, is_authoritative, is_offline};
 use super::state::GameState;
@@ -223,7 +223,7 @@ fn attach_player_sprite(
     }
 }
 
-/// Spawns staged crack overlays as children of any player or enemy that has
+/// Spawns staged crack overlays as children of any player or bot that has
 /// replicated health but no cracks yet. The overlays are hidden by default and
 /// revealed by [`update_health_cracks`].
 #[cfg(feature = "client")]
@@ -234,7 +234,7 @@ fn attach_health_cracks(
     actors: Query<
         Entity,
         (
-            Or<(With<Player>, With<Enemy>)>,
+            Or<(With<Player>, With<Bot>)>,
             With<Health>,
             Without<HasHealthCracks>,
         ),
@@ -267,12 +267,12 @@ fn attach_health_cracks(
 }
 
 /// Reveals crack stages as health drops. Stages are coarse, so players and
-/// enemies see damage buildup without reading exact HP. Dead actors hide all
+/// bots see damage buildup without reading exact HP. Dead actors hide all
 /// cracks.
 #[cfg(feature = "client")]
 #[allow(clippy::type_complexity)]
 fn update_health_cracks(
-    actors: Query<(&Health, &Children, Has<Dead>), Or<(With<Player>, With<Enemy>)>>,
+    actors: Query<(&Health, &Children, Has<Dead>), Or<(With<Player>, With<Bot>)>>,
     mut cracks: Query<(&HealthCrack, &mut Visibility)>,
 ) {
     for (health, children, dead) in &actors {
