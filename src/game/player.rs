@@ -109,18 +109,32 @@ fn spawn_player(mut commands: Commands, selected: Res<SelectedColor>, map: Res<C
     ));
 }
 
-/// Advances every player's authoritative position from its intent, clamped to
-/// the arena. Runs on the server and in offline single-player.
+/// Advances every player's authoritative position from its intent, sliding
+/// along map walls and clamped to the arena. Runs on the server and in offline
+/// single-player.
 fn apply_player_intent(
     time: Res<Time>,
     bounds: Res<ArenaBounds>,
+    map: Res<CurrentMap>,
     mut query: Query<(&mut NetPos, &PlayerIntent), Without<Dead>>,
 ) {
     let half = PLAYER_SIZE / 2.0;
     for (mut pos, intent) in &mut query {
         // Clamp the magnitude so a client can't request a higher-than-allowed speed.
         let dir = intent.0.clamp_length_max(1.0);
-        let next = pos.0 + dir * PLAYER_SPEED * time.delta_secs();
+        let desired = pos.0 + dir * PLAYER_SPEED * time.delta_secs();
+
+        // Slide along walls by resolving movement one axis at a time.
+        let mut next = pos.0;
+        let candidate_x = Vec2::new(desired.x, next.y);
+        if !map.0.circle_intersects_wall(candidate_x, half) {
+            next.x = candidate_x.x;
+        }
+        let candidate_y = Vec2::new(next.x, desired.y);
+        if !map.0.circle_intersects_wall(candidate_y, half) {
+            next.y = candidate_y.y;
+        }
+
         // `set_if_neq` avoids marking the component changed (and re-replicating)
         // when a player is standing still.
         pos.set_if_neq(NetPos(bounds.clamp(next, half)));
