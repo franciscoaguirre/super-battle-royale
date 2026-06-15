@@ -15,13 +15,14 @@ use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::bot::{Bot, BotIntent};
+use super::combat::RapidFire;
 use super::map::{ArenaBounds, CurrentMap};
 use super::net::{NetPos, is_authoritative};
 use super::player::{Player, PlayerColor, PlayerIntent};
 use super::state::GameState;
 
 #[cfg(feature = "client")]
-use super::combat::Dead;
+use super::combat::{Dead, DoubleShot, QuadShot, Zigzag};
 #[cfg(feature = "client")]
 use super::net::is_offline;
 
@@ -37,6 +38,12 @@ const INITIAL_HEIGHT: f32 = 12.0;
 const GROUND_LEVEL: f32 = 0.0;
 /// Minimum seconds between shots from one player.
 const FIRE_COOLDOWN: f32 = 0.35;
+/// How much faster the fire-rate cooldown ticks while a player holds [`RapidFire`].
+const RAPIDFIRE_FACTOR: f32 = 2.5;
+/// Peak sideways deflection (radians) of a zig-zagging shot's velocity.
+const ZIGZAG_AMPLITUDE: f32 = 0.7;
+/// Angular frequency (radians/second) of a zig-zagging shot's weave.
+const ZIGZAG_FREQUENCY: f32 = 12.0;
 /// Collision radius of a shot, used for PvP hit detection (shared with the
 /// server, so it is not gated behind the `client` feature).
 pub const PROJECTILE_RADIUS: f32 = 5.0;
@@ -101,6 +108,53 @@ pub struct Facing(pub Vec2);
 #[derive(Component, Debug)]
 pub struct FireCooldown(pub Timer);
 
+/// Server/sim-only: makes a shot weave from side to side. `elapsed` accumulates
+/// flight time; its initial value is seeded from the launch angle so several
+/// shots fired at once (a quad-burst) weave out of phase rather than in lockstep.
+/// Clients render the weave for free via the replicated [`NetPos`].
+#[derive(Component, Clone, Copy, Debug)]
+pub struct ZigzagMotion {
+    elapsed: f32,
+}
+
+/// Firing modifiers a shot inherits from its shooter's active power-ups: how many
+/// directions to fire in (1, 2 or 4) and whether the shots weave. Built at each
+/// fire site from the shooter's buff components and passed into [`try_fire`].
+#[derive(Clone, Copy, Debug)]
+pub struct ShotMods {
+    pub directions: u8,
+    pub zigzag: bool,
+}
+
+impl Default for ShotMods {
+    fn default() -> Self {
+        Self {
+            directions: 1,
+            zigzag: false,
+        }
+    }
+}
+
+impl ShotMods {
+    /// A single straight shot — the default for shooters with no fire-pattern buffs.
+    pub fn single() -> Self {
+        Self::default()
+    }
+
+    /// Builds the modifiers from a shooter's active fire-pattern buffs. Quad
+    /// (four-way) supersedes Double (two-way) when both are held.
+    pub fn from_buffs(double: bool, quad: bool, zigzag: bool) -> Self {
+        let directions = if quad {
+            4
+        } else if double {
+            2
+        } else {
+            1
+        };
+        Self { directions, zigzag }
+    }
+}
+
 /// Client-only marker for the ground shadow drawn beneath a shot.
 #[cfg(feature = "client")]
 #[derive(Component)]
@@ -123,6 +177,8 @@ pub enum ImpactKind {
     Ground,
     /// Struck a player.
     Object,
+    /// A power-up was collected.
+    Pickup,
 }
 
 /// A short-lived, replicated marker spawned where a shot ended. Clients play the
@@ -216,24 +272,54 @@ fn update_facing(
     }
 }
 
-pub(crate) fn tick_cooldowns(time: Res<Time>, mut query: Query<&mut FireCooldown>) {
-    for mut cooldown in &mut query {
-        cooldown.0.tick(time.delta());
+pub(crate) fn tick_cooldowns(
+    time: Res<Time>,
+    mut query: Query<(&mut FireCooldown, Option<&RapidFire>)>,
+) {
+    for (mut cooldown, rapid) in &mut query {
+        // RapidFire just advances the cooldown faster, so it self-cleans when the
+        // buff component is removed — no stored base duration to restore.
+        let step = if rapid.is_some() {
+            time.delta().mul_f32(RAPIDFIRE_FACTOR)
+        } else {
+            time.delta()
+        };
+        cooldown.0.tick(step);
     }
 }
 
 /// Moves shots forward, sinks them under gravity, and despawns them when they
 /// crash into the ground or leave the arena.
+#[allow(clippy::type_complexity)]
 fn simulate_projectiles(
     time: Res<Time>,
     bounds: Res<ArenaBounds>,
     map: Res<CurrentMap>,
     mut commands: Commands,
-    mut query: Query<(Entity, &mut NetPos, &mut Height, &mut ProjectileVelocity), With<Projectile>>,
+    mut query: Query<
+        (
+            Entity,
+            &mut NetPos,
+            &mut Height,
+            &mut ProjectileVelocity,
+            Option<&mut ZigzagMotion>,
+        ),
+        With<Projectile>,
+    >,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut pos, mut height, mut velocity) in &mut query {
-        pos.0 += velocity.horizontal * dt;
+    for (entity, mut pos, mut height, mut velocity, zigzag) in &mut query {
+        // A zig-zagging shot rotates its (constant) base velocity by an
+        // oscillating angle each frame; rotating a fresh copy avoids drift.
+        let horizontal = match zigzag {
+            Some(mut motion) => {
+                motion.elapsed += dt;
+                let angle = ZIGZAG_AMPLITUDE * (ZIGZAG_FREQUENCY * motion.elapsed).sin();
+                Vec2::from_angle(angle).rotate(velocity.horizontal)
+            }
+            None => velocity.horizontal,
+        };
+        pos.0 += horizontal * dt;
         velocity.vertical -= GRAVITY * dt;
         height.0 += velocity.vertical * dt;
 
@@ -274,8 +360,10 @@ fn tick_impacts(
     }
 }
 
-/// Fires a shot from `origin` in `facing` if the player's cooldown has elapsed.
-/// Shared by offline input and the server's network handler.
+/// Fires from `origin` along `facing` if the cooldown has elapsed, honouring the
+/// shooter's fire-pattern power-ups via `mods`. Shared by offline input, the
+/// server's network handler, and bot AI. One cooldown reset covers the whole
+/// burst, so multi-shot adds bullets without raising the fire rate.
 pub(crate) fn try_fire(
     commands: &mut Commands,
     owner: Entity,
@@ -283,10 +371,29 @@ pub(crate) fn try_fire(
     origin: &NetPos,
     facing: &Facing,
     cooldown: &mut FireCooldown,
+    mods: ShotMods,
 ) {
-    if cooldown.0.is_finished() {
-        cooldown.0.reset();
-        spawn_projectile(commands, owner, color, origin.0, facing.0);
+    if !cooldown.0.is_finished() {
+        return;
+    }
+    cooldown.0.reset();
+
+    let forward = facing.0.normalize_or_zero();
+    match mods.directions {
+        // Forward + backward.
+        2 => {
+            spawn_projectile(commands, owner, color, origin.0, forward, mods.zigzag);
+            spawn_projectile(commands, owner, color, origin.0, -forward, mods.zigzag);
+        }
+        // A four-way cross around the facing direction.
+        4 => {
+            let side = forward.perp();
+            for dir in [forward, side, -forward, -side] {
+                spawn_projectile(commands, owner, color, origin.0, dir, mods.zigzag);
+            }
+        }
+        // A single straight shot.
+        _ => spawn_projectile(commands, owner, color, origin.0, forward, mods.zigzag),
     }
 }
 
@@ -296,19 +403,27 @@ fn spawn_projectile(
     color: PlayerColor,
     origin: Vec2,
     direction: Vec2,
+    zigzag: bool,
 ) {
-    commands.spawn((
+    let dir = direction.normalize_or_zero();
+    let mut shot = commands.spawn((
         Projectile,
         ProjectileOwner(owner),
         ShotColor(color),
         NetPos(origin),
         Height(INITIAL_HEIGHT),
         ProjectileVelocity {
-            horizontal: direction.normalize_or_zero() * PROJECTILE_SPEED,
+            horizontal: dir * PROJECTILE_SPEED,
             vertical: 0.0,
         },
         Replicated,
     ));
+    if zigzag {
+        // Seed the weave phase from the launch angle so a multi-shot burst fans out.
+        shot.insert(ZigzagMotion {
+            elapsed: dir.to_angle(),
+        });
+    }
 }
 
 /// Offline single-player: fire the local player on Space.
@@ -318,15 +433,33 @@ fn offline_shoot(
     keys: Res<ButtonInput<KeyCode>>,
     mut commands: Commands,
     mut players: Query<
-        (Entity, &NetPos, &Facing, &mut FireCooldown, &PlayerColor),
+        (
+            Entity,
+            &NetPos,
+            &Facing,
+            &mut FireCooldown,
+            &PlayerColor,
+            Option<&DoubleShot>,
+            Option<&QuadShot>,
+            Option<&Zigzag>,
+        ),
         (With<Player>, Without<Dead>),
     >,
 ) {
     if !keys.just_pressed(KeyCode::Space) {
         return;
     }
-    for (entity, pos, facing, mut cooldown, color) in &mut players {
-        try_fire(&mut commands, entity, *color, pos, facing, &mut cooldown);
+    for (entity, pos, facing, mut cooldown, color, double, quad, zigzag) in &mut players {
+        let mods = ShotMods::from_buffs(double.is_some(), quad.is_some(), zigzag.is_some());
+        try_fire(
+            &mut commands,
+            entity,
+            *color,
+            pos,
+            facing,
+            &mut cooldown,
+            mods,
+        );
     }
 }
 
@@ -441,6 +574,8 @@ fn play_impact_sounds(
         let path = match impact.0 {
             ImpactKind::Ground => HIT_GROUND_SOUND,
             ImpactKind::Object => HIT_OBJECT_SOUND,
+            // Pickups get a visual pop only for now (no fitting chime asset yet).
+            ImpactKind::Pickup => continue,
         };
         play_sound(&mut commands, &asset_server, path);
     }
@@ -489,5 +624,109 @@ fn fade_trail(
         let f = 1.0 - segment.timer.fraction();
         sprite.color = segment.glow.with_alpha(f);
         sprite.custom_size = Some(Vec2::splat(TRAIL_SIZE * f));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::map::TileMap;
+    use std::time::Duration;
+
+    /// Fires once with `directions` fire-pattern and returns how many projectiles
+    /// were spawned. A "ready" cooldown lets the single shot through.
+    fn projectiles_fired(directions: u8) -> usize {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        let mut ready = Timer::from_seconds(FIRE_COOLDOWN, TimerMode::Once);
+        ready.finish();
+        let owner = app
+            .world_mut()
+            .spawn((NetPos(Vec2::ZERO), Facing(Vec2::Y), FireCooldown(ready)))
+            .id();
+        app.add_systems(
+            Update,
+            move |mut commands: Commands,
+                  mut shooter: Query<(&NetPos, &Facing, &mut FireCooldown)>| {
+                if let Ok((pos, facing, mut cooldown)) = shooter.get_mut(owner) {
+                    try_fire(
+                        &mut commands,
+                        owner,
+                        PlayerColor::Blue,
+                        pos,
+                        facing,
+                        &mut cooldown,
+                        ShotMods {
+                            directions,
+                            zigzag: false,
+                        },
+                    );
+                }
+            },
+        );
+        app.update();
+        let mut q = app.world_mut().query::<&Projectile>();
+        q.iter(app.world()).count()
+    }
+
+    #[test]
+    fn fire_patterns_spawn_the_expected_shot_count() {
+        assert_eq!(projectiles_fired(1), 1, "single shot");
+        assert_eq!(
+            projectiles_fired(2),
+            2,
+            "double shot fires forward + backward"
+        );
+        assert_eq!(projectiles_fired(4), 4, "quad shot fires a four-way cross");
+    }
+
+    #[test]
+    fn zigzag_projectile_weaves_sideways_while_advancing() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_secs_f32(1.0 / 60.0),
+        ));
+        // An open, wall-free map and huge bounds so the shot never despawns.
+        app.insert_resource(CurrentMap(TileMap::parse("xxxxxxxxxx")));
+        app.insert_resource(ArenaBounds {
+            min: Vec2::splat(-10_000.0),
+            max: Vec2::splat(10_000.0),
+        });
+        app.add_systems(Update, simulate_projectiles);
+
+        // Flying straight along +X; the weave should push it off the X axis.
+        let shot = app
+            .world_mut()
+            .spawn((
+                Projectile,
+                NetPos(Vec2::ZERO),
+                Height(1000.0), // high up, so gravity won't crash it during the test
+                ProjectileVelocity {
+                    horizontal: Vec2::new(PROJECTILE_SPEED, 0.0),
+                    vertical: 0.0,
+                },
+                ZigzagMotion { elapsed: 0.0 },
+            ))
+            .id();
+
+        for _ in 0..15 {
+            app.update();
+        }
+        let pos = app
+            .world()
+            .get::<NetPos>(shot)
+            .expect("the zig-zag shot should still be alive")
+            .0;
+        assert!(
+            pos.y.abs() > 1.0,
+            "a zig-zag shot should deviate sideways (got y={})",
+            pos.y
+        );
+        assert!(
+            pos.x > 0.0,
+            "a zig-zag shot should still travel forward (got x={})",
+            pos.x
+        );
     }
 }

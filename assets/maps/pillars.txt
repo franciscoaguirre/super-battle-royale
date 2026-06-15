@@ -7,7 +7,7 @@ song: sinister
 
 wwwwwwwwwwwwwwwwww
 wsxxxxxxxxxxxxxxsw
-wxxxxxxxxxxxxxxxxw
+wxxxpxxxxxxxxpxxxw
 wxxwxxwxxwxxwxxwxw
 wxxxxxxxx12xxxxxxw
 wxxwxxwxxwxxwxxwxw
@@ -15,6 +15,6 @@ wxxxxxxxxssxxxxxxw
 wxxwxxwxxwxxwxxwxw
 wxxxxxxxx21xxxxxxw
 wxxwxxwxxwxxwxxwxw
-wxxxxxxxxxxxxxxxxw
+wxxxpxxxxxxxxpxxxw
 wsxxxxxxxxxxxxxxsw
 wwwwwwwwwwwwwwwwww
