@@ -19,7 +19,7 @@ use super::{
     MatchInfo, NetPos, Owner, PlayerInput, ShieldRequest, ShootRequest, StartMatch, YouAreOwner,
     is_server, protocol_id_for, register_protocol,
 };
-use crate::game::combat::{Dead, give_spawn_invulnerability};
+use crate::game::combat::{Dead, SpawnInvulnerability, give_spawn_invulnerability};
 use crate::game::map::{self, CurrentMap};
 use crate::game::player::{Player, PlayerColor, PlayerIntent};
 use crate::game::projectile::{Facing, FireCooldown, try_fire};
@@ -221,7 +221,11 @@ fn receive_shoot(
     mut commands: Commands,
     mut players: Query<
         (&NetPos, &Facing, &mut FireCooldown, &PlayerColor),
-        (Without<Dead>, Without<crate::game::shield::Shielding>),
+        (
+            Without<Dead>,
+            Without<crate::game::shield::Shielding>,
+            Without<SpawnInvulnerability>,
+        ),
     >,
 ) {
     if let Some(entity) = request.client_id.entity()

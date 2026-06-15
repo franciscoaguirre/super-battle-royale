@@ -637,7 +637,6 @@ fn kill_heals_owner_by_one() {
 /// then takes damage normally once the protection expires.
 #[test]
 fn spawn_invulnerability_protects_for_two_seconds() {
-    use bevy::time::{Timer, TimerMode};
     use super_battle_royale::game::combat::{CombatPlugin, Health, SpawnInvulnerability};
     use super_battle_royale::game::map::{CurrentMap, TileMap};
     use super_battle_royale::game::net::NetRole;
@@ -669,10 +668,10 @@ fn spawn_invulnerability_protects_for_two_seconds() {
     app.update();
     app.world_mut()
         .entity_mut(target)
-        .insert(SpawnInvulnerability(Timer::from_seconds(
-            2.0,
-            TimerMode::Once,
-        )));
+        .insert(SpawnInvulnerability {
+            remaining: 2.0,
+            max: 2.0,
+        });
     assert_eq!(app.world().get::<Health>(target).unwrap().current, 2.0);
 
     // Fire immediately: invulnerability should absorb the shot.
@@ -722,6 +721,60 @@ fn spawn_invulnerability_protects_for_two_seconds() {
         app.world().get::<Health>(target).unwrap().current,
         1.0,
         "target should take damage once invulnerability expires"
+    );
+}
+
+#[test]
+fn shielding_drops_on_bot_death() {
+    use std::time::Duration;
+
+    use bevy::time::TimeUpdateStrategy;
+    use super_battle_royale::game::combat::{CombatPlugin, Health};
+    use super_battle_royale::game::map::{CurrentMap, TileMap};
+    use super_battle_royale::game::net::NetRole;
+    use super_battle_royale::game::shield::{ShieldPlugin, ShieldState, ShieldStatus, Shielding};
+    use super_battle_royale::game::state::GameState;
+
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin, ShieldPlugin));
+    app.insert_state(GameState::Playing);
+    app.insert_resource(NetRole::Server);
+    app.insert_resource(CurrentMap(TileMap::parse("wsw")));
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+        1.0 / 60.0,
+    )));
+
+    let bot = app
+        .world_mut()
+        .spawn((Bot, NetPos(Vec2::ZERO), ShieldState::default()))
+        .id();
+
+    // First tick grants health.
+    app.update();
+
+    // Raise the bot's shield.
+    app.world_mut()
+        .get_mut::<ShieldState>(bot)
+        .unwrap()
+        .requested = true;
+    app.update();
+    assert!(
+        app.world().get::<Shielding>(bot).is_some(),
+        "bot should be shielding"
+    );
+
+    // Kill the bot.
+    app.world_mut().get_mut::<Health>(bot).unwrap().current = 0.0;
+    app.update();
+
+    assert!(
+        app.world().get::<Shielding>(bot).is_none(),
+        "shield marker should be removed on death"
+    );
+    let state = app.world().get::<ShieldState>(bot).unwrap();
+    assert!(
+        matches!(state.status, ShieldStatus::Ready),
+        "shield should reset to ready on death"
     );
 }
 

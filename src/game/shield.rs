@@ -14,7 +14,7 @@ use bevy::asset::RenderAssetUsages;
 #[cfg(feature = "client")]
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-use super::combat::Dead;
+use super::combat::{Dead, SpawnInvulnerability};
 use super::net::{NetPos, is_authoritative};
 use super::player::PLAYER_SIZE;
 #[cfg(feature = "client")]
@@ -88,6 +88,11 @@ struct ShieldBubble;
 #[cfg(feature = "client")]
 #[derive(Component)]
 struct ShieldChargeRing;
+
+/// Marker for the circular spawn-invulnerability timer ring spawned as a child.
+#[cfg(feature = "client")]
+#[derive(Component)]
+struct InvulnTimerRing;
 
 /// Marker that an actor already has shield visual children.
 #[cfg(feature = "client")]
@@ -304,9 +309,24 @@ fn attach_shield_visuals(
             ))
             .id();
 
+        let invuln = commands
+            .spawn((
+                InvulnTimerRing,
+                Sprite {
+                    image: textures.ring.clone(),
+                    color: Color::srgba(0.85, 0.85, 0.85, 0.0),
+                    custom_size: Some(Vec2::splat(PLAYER_SIZE * 1.85)),
+                    ..default()
+                },
+                Transform::from_xyz(0.0, 0.0, 0.35),
+                Visibility::Hidden,
+                super::InGame,
+            ))
+            .id();
+
         commands
             .entity(entity)
-            .add_children(&[bubble, ring])
+            .add_children(&[bubble, ring, invuln])
             .insert(HasShieldVisuals);
     }
 }
@@ -315,21 +335,47 @@ fn attach_shield_visuals(
 #[allow(clippy::type_complexity)]
 fn update_shield_visuals(
     actors: Query<
-        (&ShieldCharge, Option<&Shielding>, &PlayerColor, &Children),
+        (
+            &ShieldCharge,
+            Option<&Shielding>,
+            Option<&SpawnInvulnerability>,
+            &PlayerColor,
+            &Children,
+            Has<Dead>,
+        ),
         Or<(With<Player>, With<Bot>)>,
     >,
     mut bubbles: Query<
         (&mut Visibility, &mut Sprite),
-        (With<ShieldBubble>, Without<ShieldChargeRing>),
+        (
+            With<ShieldBubble>,
+            Without<ShieldChargeRing>,
+            Without<InvulnTimerRing>,
+        ),
     >,
-    mut rings: Query<&mut Sprite, (With<ShieldChargeRing>, Without<ShieldBubble>)>,
+    mut rings: Query<
+        (&mut Visibility, &mut Sprite),
+        (
+            With<ShieldChargeRing>,
+            Without<ShieldBubble>,
+            Without<InvulnTimerRing>,
+        ),
+    >,
+    mut invulns: Query<
+        (&mut Visibility, &mut Sprite),
+        (
+            With<InvulnTimerRing>,
+            Without<ShieldBubble>,
+            Without<ShieldChargeRing>,
+        ),
+    >,
 ) {
-    for (charge, shielding, color, children) in &actors {
+    for (charge, shielding, invuln, color, children, dead) in &actors {
         let glow = player_glow(*color);
 
         for child in children {
             if let Ok((mut visibility, mut sprite)) = bubbles.get_mut(*child) {
-                if shielding.is_some() {
+                if !dead && invuln.is_none() && shielding.is_some() {
                     *visibility = Visibility::Visible;
                     sprite.color = glow.with_alpha(0.55);
                 } else {
@@ -337,13 +383,31 @@ fn update_shield_visuals(
                 }
             }
 
-            if let Ok(mut sprite) = rings.get_mut(*child) {
-                // Show a subtle readiness ring when fully charged.
-                if charge.0 >= 1.0 {
+            if let Ok((mut visibility, mut sprite)) = rings.get_mut(*child) {
+                if dead || invuln.is_some() {
+                    // Dead actors shouldn't show any shield indicator; invulnerability
+                    // uses its own timer ring instead.
+                    *visibility = Visibility::Hidden;
+                    sprite.color = glow.with_alpha(0.0);
+                } else if charge.0 >= 1.0 {
+                    *visibility = Visibility::Visible;
+                    // Show a subtle readiness ring when fully charged.
                     sprite.color = glow.with_alpha(0.25);
                 } else {
+                    *visibility = Visibility::Visible;
                     // Fade out while recharging so the player knows it is not ready.
                     sprite.color = glow.with_alpha(0.08 * charge.0);
+                }
+            }
+
+            if let Ok((mut visibility, mut sprite)) = invulns.get_mut(*child) {
+                if !dead && let Some(inv) = invuln {
+                    *visibility = Visibility::Visible;
+                    let t = (inv.remaining / inv.max).clamp(0.0, 1.0);
+                    // The ring fills (becomes more opaque) as invulnerability runs out.
+                    sprite.color = Color::srgba(0.85, 0.85, 0.85, 1.0 - t);
+                } else {
+                    *visibility = Visibility::Hidden;
                 }
             }
         }

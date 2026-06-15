@@ -30,7 +30,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 
 use super::bot::Bot;
-use super::combat::{Dead, Health};
+use super::combat::{Dead, Health, SpawnInvulnerability};
 use super::player::{Player, PlayerColor};
 use super::projectile::{Height, Impact, Projectile, ShotColor};
 use super::shield::{ShieldCharge, Shielding};
@@ -100,6 +100,7 @@ pub fn register_protocol(app: &mut App) {
         .replicate::<MatchInfo>()
         .replicate::<Shielding>()
         .replicate::<ShieldCharge>()
+        .replicate::<SpawnInvulnerability>()
         .add_client_event::<PlayerInput>(Channel::Unreliable)
         .add_client_event::<ShootRequest>(Channel::Ordered)
         .add_client_event::<ShieldRequest>(Channel::Ordered)

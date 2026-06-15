@@ -55,10 +55,13 @@ pub struct Dead;
 #[derive(Component)]
 struct RespawnTimer(Timer);
 
-/// Server/sim-only marker: the player or bot is invulnerable after spawning
-/// or respawning. Removed once [`SPAWN_INVULNERABILITY_DURATION`] elapses.
-#[derive(Component)]
-pub struct SpawnInvulnerability(pub Timer);
+/// Replicated marker: the player or bot is invulnerable after spawning or
+/// respawning. Removed once `remaining` reaches zero.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct SpawnInvulnerability {
+    pub remaining: f32,
+    pub max: f32,
+}
 
 /// Server/sim-only marker: this entity should heal by the stored amount once
 /// hits have been resolved. Inserted on a killer in [`apply_hit_resolutions`]
@@ -107,11 +110,12 @@ impl Plugin for CombatPlugin {
                 .run_if(is_authoritative),
         );
 
-        // Client: hide players and bots that are currently dead.
+        // Client: hide dead actors and apply spawn-invulnerability tint/opacity.
         #[cfg(feature = "client")]
         app.add_systems(
             Update,
-            hide_dead_entities.run_if(in_state(GameState::Playing)),
+            (hide_dead_entities, update_invulnerability_actor_visuals)
+                .run_if(in_state(GameState::Playing)),
         );
     }
 }
@@ -131,23 +135,21 @@ fn ensure_health(
 /// Gives an entity temporary spawn invulnerability. Used by player/bot spawn
 /// systems so freshly-spawned actors cannot be spawn-camped.
 pub(crate) fn give_spawn_invulnerability(commands: &mut Commands, entity: Entity) {
-    commands
-        .entity(entity)
-        .insert(SpawnInvulnerability(Timer::from_seconds(
-            SPAWN_INVULNERABILITY_DURATION,
-            TimerMode::Once,
-        )));
+    commands.entity(entity).insert(SpawnInvulnerability {
+        remaining: SPAWN_INVULNERABILITY_DURATION,
+        max: SPAWN_INVULNERABILITY_DURATION,
+    });
 }
 
-/// Ticks down spawn invulnerability timers and removes the marker once it
-/// expires.
+/// Ticks down spawn invulnerability and removes the marker once it expires.
 fn tick_spawn_invulnerability(
     time: Res<Time>,
     mut commands: Commands,
     mut entities: Query<(Entity, &mut SpawnInvulnerability)>,
 ) {
     for (entity, mut inv) in &mut entities {
-        if inv.0.tick(time.delta()).just_finished() {
+        inv.remaining -= time.delta_secs();
+        if inv.remaining <= 0.0 {
             commands.entity(entity).remove::<SpawnInvulnerability>();
         }
     }
@@ -309,15 +311,22 @@ fn apply_pending_heals(
     }
 }
 
-/// Marks players or bots whose health has run out as dead and starts their
-/// respawn timer.
+/// Marks players or bots whose health has run out as dead, starts their
+/// respawn timer, and drops any active shield so they don't respawn shielded.
 #[allow(clippy::type_complexity)]
 fn handle_deaths(
     mut commands: Commands,
-    entities: Query<(Entity, &Health), (Or<(With<Player>, With<Bot>)>, Without<Dead>)>,
+    mut entities: Query<
+        (Entity, &Health, &mut ShieldState),
+        (Or<(With<Player>, With<Bot>)>, Without<Dead>),
+    >,
 ) {
-    for (entity, health) in &entities {
+    for (entity, health, mut state) in &mut entities {
         if health.current <= 0.0 {
+            commands.entity(entity).remove::<super::shield::Shielding>();
+            state.status = super::shield::ShieldStatus::Ready;
+            state.charge = 1.0;
+            state.requested = false;
             commands.entity(entity).insert((
                 Dead,
                 RespawnTimer(Timer::from_seconds(RESPAWN_DELAY, TimerMode::Once)),
@@ -327,31 +336,42 @@ fn handle_deaths(
 }
 
 /// Respawns dead players or bots once their timer elapses: relocate to a
-/// spawn point, refill health, and clear the dead state.
+/// spawn point, refill health, clear the dead state, and grant spawn
+/// invulnerability.
 #[allow(clippy::type_complexity)]
 fn tick_respawns(
     time: Res<Time>,
     map: Res<CurrentMap>,
     mut commands: Commands,
     mut entities: Query<
-        (Entity, &mut NetPos, &mut Health, &mut RespawnTimer),
+        (
+            Entity,
+            &mut NetPos,
+            &mut Health,
+            &mut RespawnTimer,
+            &mut ShieldState,
+        ),
         Or<(With<Player>, With<Bot>)>,
     >,
 ) {
-    for (entity, mut pos, mut health, mut timer) in &mut entities {
+    for (entity, mut pos, mut health, mut timer, mut state) in &mut entities {
         if timer.0.tick(time.delta()).just_finished() {
             let spawns = map.0.spawn_points();
             if !spawns.is_empty() {
                 pos.0 = spawns[entity.to_bits() as usize % spawns.len()];
             }
             health.current = health.max;
-            commands.entity(entity).remove::<(Dead, RespawnTimer)>();
+            // Make sure the actor respawns without a stale shield request or marker.
             commands
                 .entity(entity)
-                .insert(SpawnInvulnerability(Timer::from_seconds(
-                    SPAWN_INVULNERABILITY_DURATION,
-                    TimerMode::Once,
-                )));
+                .remove::<(Dead, RespawnTimer, super::shield::Shielding)>();
+            state.status = super::shield::ShieldStatus::Ready;
+            state.charge = 1.0;
+            state.requested = false;
+            commands.entity(entity).insert(SpawnInvulnerability {
+                remaining: SPAWN_INVULNERABILITY_DURATION,
+                max: SPAWN_INVULNERABILITY_DURATION,
+            });
         }
     }
 }
@@ -368,5 +388,23 @@ fn hide_dead_entities(
         } else {
             Visibility::Visible
         };
+    }
+}
+
+/// Grays out invulnerable actors and fades their opacity from 50% to 100% over
+/// the spawn-protection window. Non-invulnerable actors are reset to normal.
+#[cfg(feature = "client")]
+#[allow(clippy::type_complexity)]
+fn update_invulnerability_actor_visuals(
+    mut actors: Query<(&mut Sprite, Option<&SpawnInvulnerability>), Or<(With<Player>, With<Bot>)>>,
+) {
+    for (mut sprite, inv) in &mut actors {
+        if let Some(inv) = inv {
+            let t = (inv.remaining / inv.max).clamp(0.0, 1.0);
+            let alpha = 1.0 - 0.5 * t;
+            sprite.color = Color::srgba(0.65, 0.65, 0.65, alpha);
+        } else {
+            sprite.color = Color::srgba(1.0, 1.0, 1.0, 1.0);
+        }
     }
 }

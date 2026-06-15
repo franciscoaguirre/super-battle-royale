@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::combat::{Dead, give_spawn_invulnerability};
+use super::combat::{Dead, SpawnInvulnerability, give_spawn_invulnerability};
 use super::map::{ArenaBounds, CurrentMap};
 use super::net::{NetPos, is_authoritative};
 use super::player::PlayerColor;
@@ -241,7 +241,12 @@ fn bot_shoot(
             &PlayerColor,
             &BotAI,
         ),
-        (With<Bot>, Without<Dead>, Without<super::shield::Shielding>),
+        (
+            With<Bot>,
+            Without<Dead>,
+            Without<super::shield::Shielding>,
+            Without<SpawnInvulnerability>,
+        ),
     >,
     players: Query<&NetPos, (With<super::player::Player>, Without<Dead>)>,
 ) {

@@ -20,7 +20,7 @@ use super::player::{Player, PlayerColor, PlayerIntent};
 use super::state::GameState;
 
 #[cfg(feature = "client")]
-use super::combat::Dead;
+use super::combat::{Dead, SpawnInvulnerability};
 #[cfg(feature = "client")]
 use super::net::is_offline;
 
@@ -323,6 +323,7 @@ fn offline_shoot(
             With<Player>,
             Without<Dead>,
             Without<super::shield::Shielding>,
+            Without<SpawnInvulnerability>,
         ),
     >,
 ) {
