@@ -245,8 +245,8 @@ const GLYPH_SIZE: usize = 64;
 /// ground pad markers.
 #[cfg(feature = "client")]
 #[derive(Resource)]
-struct PickupArt {
-    glyphs: [Handle<Image>; 7],
+pub(crate) struct PickupArt {
+    pub(crate) glyphs: [Handle<Image>; 7],
     halo: Handle<Image>,
 }
 
@@ -254,7 +254,7 @@ struct PickupArt {
 impl PickupKind {
     /// Stable index into [`PickupArt::glyphs`]. Order is arbitrary but must match
     /// the array built in [`init_pickup_art`].
-    fn glyph_index(self) -> usize {
+    pub(crate) fn glyph_index(self) -> usize {
         match self {
             PickupKind::Heal => 0,
             PickupKind::Speed => 1,
@@ -354,7 +354,7 @@ fn spawn_pad_decals(mut commands: Commands, art: Option<Res<PickupArt>>, map: Re
 /// HDR (linear > 1.0) glow color per kind, so pickups bloom and read at a glance.
 /// Chosen to be mutually distinct around the wheel.
 #[cfg(feature = "client")]
-fn pickup_glow(kind: PickupKind) -> Color {
+pub(crate) fn pickup_glow(kind: PickupKind) -> Color {
     match kind {
         PickupKind::Heal => Color::linear_rgb(1.2, 8.0, 2.2), // green
         PickupKind::Speed => Color::linear_rgb(1.2, 7.0, 8.0), // cyan
@@ -477,7 +477,7 @@ mod tests {
     // SpeedBoost, DamageBoost, NetPos, Player, GameState, the bevy prelude, ...);
     // only items pickup doesn't import are added explicitly, to avoid clashes.
     use super::*;
-    use crate::game::combat::CombatPlugin;
+    use crate::game::combat::{ActiveBuffs, CombatPlugin};
     use crate::game::map::TileMap;
     use crate::game::net::NetRole;
     use crate::game::projectile::{Projectile, ProjectileOwner};
@@ -554,6 +554,74 @@ mod tests {
             app.world().get::<SpeedBoost>(player).is_some(),
             "collecting a Speed pickup should grant a SpeedBoost"
         );
+    }
+
+    #[test]
+    fn collecting_a_buff_populates_active_buffs() {
+        let mut app = test_app("wsw");
+        let player = app.world_mut().spawn((Player, NetPos(Vec2::ZERO))).id();
+        app.update();
+        drop_pickup(&mut app, PickupKind::Speed, Vec2::ZERO);
+        app.update(); // collect → grant SpeedBoost (deferred)
+        app.update(); // sync_active_buffs sees it → builds the summary
+
+        let buffs = app
+            .world()
+            .get::<ActiveBuffs>(player)
+            .expect("collecting a buff should populate ActiveBuffs");
+        assert_eq!(buffs.0.len(), 1, "one active buff");
+        assert_eq!(buffs.0[0].kind, PickupKind::Speed);
+        assert!(
+            (buffs.0[0].total - SPEED_DURATION).abs() < 1e-3,
+            "total should be the buff's full duration"
+        );
+        assert!(
+            buffs.0[0].remaining > 0.0 && buffs.0[0].remaining <= SPEED_DURATION,
+            "remaining should be within (0, duration]"
+        );
+    }
+
+    #[test]
+    fn active_buffs_clears_when_the_buff_expires() {
+        let mut app = test_app("wsw");
+        let player = app.world_mut().spawn((Player, NetPos(Vec2::ZERO))).id();
+        app.update();
+        app.world_mut()
+            .entity_mut(player)
+            .insert(SpeedBoost(Timer::from_seconds(0.1, TimerMode::Once)));
+        app.update(); // sync builds the summary
+        assert!(
+            app.world().get::<ActiveBuffs>(player).is_some(),
+            "an active buff should produce a summary"
+        );
+        for _ in 0..20 {
+            app.update(); // tick the buff away; sync then drops the summary
+        }
+        assert!(
+            app.world().get::<ActiveBuffs>(player).is_none(),
+            "the summary should be removed once the last buff expires"
+        );
+    }
+
+    #[test]
+    fn round_advance_strips_buffs() {
+        let mut app = test_app("wsw");
+        let player = app.world_mut().spawn((Player, NetPos(Vec2::ZERO))).id();
+        app.update();
+        app.world_mut()
+            .entity_mut(player)
+            .insert(SpeedBoost(Timer::from_seconds(60.0, TimerMode::Once)));
+        app.update(); // summary built
+        assert!(app.world().get::<SpeedBoost>(player).is_some());
+
+        // A map change re-runs the OnEnter(Playing) systems, incl. reset_combatants.
+        app.world_mut().run_schedule(OnEnter(GameState::Playing));
+        assert!(
+            app.world().get::<SpeedBoost>(player).is_none(),
+            "advancing to the next map should strip carried-over buffs"
+        );
+        app.update(); // sync drops the now-empty summary
+        assert!(app.world().get::<ActiveBuffs>(player).is_none());
     }
 
     #[test]

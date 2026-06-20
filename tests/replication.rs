@@ -235,6 +235,48 @@ fn replicates_pickups() {
     assert_eq!(pos.0, PICKUP_POS);
 }
 
+/// A player's `ActiveBuffs` summary replicates to the client, so the HUD can show
+/// which power-ups the local player holds and their countdowns. Buffs themselves
+/// stay authoritative-only; this aggregate is the client's only window into them.
+#[test]
+fn replicates_active_buffs() {
+    use super_battle_royale::game::combat::{ActiveBuffs, BuffStatus};
+
+    let mut server_app = build_app();
+    let mut client_app = build_app();
+
+    server_app.world_mut().spawn((
+        Player,
+        NetPos(PLAYER_POS),
+        ActiveBuffs(vec![BuffStatus {
+            kind: PickupKind::Speed,
+            remaining: 4.5,
+            total: 5.0,
+        }]),
+        Replicated,
+    ));
+
+    let port = setup_server(&mut server_app);
+    setup_client(&mut client_app, port);
+    wait_for_connection(&mut server_app, &mut client_app);
+    for _ in 0..100 {
+        client_app.update();
+        server_app.update();
+    }
+
+    // No CombatPlugin runs here, so the summary arrives exactly as spawned.
+    let mut buffed = client_app
+        .world_mut()
+        .query_filtered::<&ActiveBuffs, With<Player>>();
+    let buffs = buffed
+        .single(client_app.world())
+        .expect("client should see the player's active buffs");
+    assert_eq!(buffs.0.len(), 1, "exactly one active buff replicated");
+    assert_eq!(buffs.0[0].kind, PickupKind::Speed);
+    assert_eq!(buffs.0[0].total, 5.0);
+    assert_eq!(buffs.0[0].remaining, 4.5);
+}
+
 /// Set to true once the client has sent its one shoot request.
 #[derive(Resource, Default)]
 struct Sent(bool);

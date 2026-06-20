@@ -31,7 +31,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 
 use super::bot::Bot;
-use super::combat::{Dead, Health, SpawnInvulnerability};
+use super::combat::{ActiveBuffs, Dead, Health, SpawnInvulnerability};
 use super::pickup::PickupKind;
 use super::player::{Player, PlayerColor};
 use super::projectile::{Impact, Projectile, ShotColor};
@@ -103,6 +103,7 @@ pub fn register_protocol(app: &mut App) {
         .replicate::<ShieldCharge>()
         .replicate::<SpawnInvulnerability>()
         .replicate::<PickupKind>()
+        .replicate::<ActiveBuffs>()
         .replicate::<LastProcessedInput>()
         .replicate::<ControllingClient>()
         .add_client_event::<PlayerInput>(Channel::Unreliable)
@@ -126,6 +127,13 @@ pub fn is_offline(role: Res<NetRole>) -> bool {
 /// True only when connected to a remote server (drives input sending).
 pub fn is_online_client(role: Res<NetRole>) -> bool {
     *role == NetRole::OnlineClient
+}
+
+/// True on any rendering client — offline single-player or an online client, but
+/// not the headless server. Used to gate client HUD that exists in both modes
+/// (e.g. the power-up tray), unlike [`is_online_client`] (ping, online-only).
+pub fn is_client(role: Res<NetRole>) -> bool {
+    matches!(*role, NetRole::Offline | NetRole::OnlineClient)
 }
 
 /// True only on the headless dedicated server. Used to position client-owned
