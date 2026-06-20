@@ -4,6 +4,7 @@ pub mod map;
 pub mod match_flow;
 pub mod music;
 pub mod net;
+pub mod pathfind;
 pub mod pickup;
 pub mod player;
 pub mod projectile;

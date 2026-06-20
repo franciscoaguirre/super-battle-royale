@@ -3,8 +3,9 @@ use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::combat::{Dead, SpawnInvulnerability, give_spawn_invulnerability};
-use super::map::{ArenaBounds, CurrentMap};
+use super::map::{ArenaBounds, CurrentMap, TILE_SIZE};
 use super::net::{NetPos, is_authoritative};
+use super::pathfind;
 use super::player::PlayerColor;
 use super::projectile::{
     Facing, FireCooldown, Projectile, ProjectileOwner, ShotMods, tick_cooldowns, try_fire,
@@ -43,6 +44,15 @@ pub struct BotAI {
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct BotIntent(pub Vec2);
 
+/// Server-only cached A* path and recalculation timer.
+#[derive(Component, Debug)]
+struct BotPath {
+    waypoints: Vec<Vec2>,
+    next: usize,
+    timer: Timer,
+    last_target: Option<Entity>,
+}
+
 pub struct BotPlugin;
 
 impl Plugin for BotPlugin {
@@ -57,6 +67,7 @@ impl Plugin for BotPlugin {
             (
                 select_bot_targets,
                 bot_shield.after(ShieldTickSet),
+                update_bot_paths,
                 update_bot_intent,
                 apply_bot_intent.after(ShieldTickSet),
                 update_bot_facing,
@@ -97,6 +108,12 @@ fn spawn_bots(mut commands: Commands, map: Res<CurrentMap>, config: Res<MatchCon
                     wander: Vec2::new(0.6, 0.8).normalize(),
                 },
                 BotIntent::default(),
+                BotPath {
+                    waypoints: Vec::new(),
+                    next: 0,
+                    timer: Timer::from_seconds(0.25, TimerMode::Repeating),
+                    last_target: None,
+                },
                 PlayerColor::Red,
                 NetPos(pos),
                 Replicated,
@@ -141,13 +158,65 @@ fn select_bot_targets(
     }
 }
 
-/// Sets the bot's movement intent. When hunting, move straight toward the
-/// target; otherwise bounce around the arena like a patrol.
+/// Recomputes each bot's A* path to its target on a fixed cadence.
+#[allow(clippy::type_complexity)]
+fn update_bot_paths(
+    time: Res<Time>,
+    map: Res<CurrentMap>,
+    mut bots: Query<(Entity, &NetPos, &mut BotAI, &mut BotPath), (With<Bot>, Without<Dead>)>,
+    targets: Query<&NetPos, (Or<(With<super::player::Player>, With<Bot>)>, Without<Dead>)>,
+) {
+    let radius = BOT_SIZE / 2.0;
+
+    for (_entity, pos, ai, mut path) in &mut bots {
+        path.timer.tick(time.delta());
+
+        let Some(target_entity) = ai.target else {
+            if !path.waypoints.is_empty() {
+                path.waypoints.clear();
+                path.next = 0;
+                path.last_target = None;
+                path.timer.reset();
+            }
+            continue;
+        };
+
+        let target_changed = path.last_target != Some(target_entity);
+        if target_changed {
+            path.last_target = Some(target_entity);
+        }
+
+        if !target_changed && !path.timer.just_finished() {
+            continue;
+        }
+
+        if let Ok(target_pos) = targets.get(target_entity) {
+            if let Some(waypoints) = pathfind::find_path(&map.0, pos.0, target_pos.0, radius) {
+                path.waypoints = waypoints;
+                path.next = 0;
+            } else if target_changed {
+                path.waypoints.clear();
+                path.next = 0;
+            }
+        } else {
+            path.waypoints.clear();
+            path.next = 0;
+            path.last_target = None;
+        }
+    }
+}
+
+/// Sets the bot's movement intent. When hunting, follow the cached A* path if
+/// one exists; otherwise move straight toward the target. When no target is
+/// visible, bounce around the arena like a patrol.
 #[allow(clippy::type_complexity)]
 fn update_bot_intent(
     time: Res<Time>,
     bounds: Res<ArenaBounds>,
-    mut bots: Query<(&NetPos, &mut BotAI, &mut BotIntent), (With<Bot>, Without<Dead>)>,
+    mut bots: Query<
+        (&NetPos, &mut BotAI, &mut BotIntent, &mut BotPath),
+        (With<Bot>, Without<Dead>),
+    >,
     targets: Query<&NetPos, (Or<(With<super::player::Player>, With<Bot>)>, Without<Dead>)>,
 ) {
     let half = BOT_SIZE / 2.0;
@@ -156,11 +225,26 @@ fn update_bot_intent(
     let min_y = bounds.min.y + half;
     let max_y = bounds.max.y - half;
 
-    for (pos, mut ai, mut intent) in &mut bots {
+    let waypoint_threshold = TILE_SIZE * 0.4;
+    let threshold_sq = waypoint_threshold * waypoint_threshold;
+
+    for (pos, mut ai, mut intent, mut path) in &mut bots {
         if let Some(target) = ai.target {
             if let Ok(target_pos) = targets.get(target) {
-                let to_target = target_pos.0 - pos.0;
-                intent.0 = to_target.normalize_or_zero();
+                let mut desired = target_pos.0 - pos.0;
+
+                // Follow cached waypoints, skipping any we have already passed.
+                while path.next < path.waypoints.len() {
+                    let to_waypoint = path.waypoints[path.next] - pos.0;
+                    if to_waypoint.length_squared() < threshold_sq {
+                        path.next += 1;
+                    } else {
+                        desired = to_waypoint;
+                        break;
+                    }
+                }
+
+                intent.0 = desired.normalize_or_zero();
                 continue;
             }
             ai.target = None;
@@ -320,6 +404,8 @@ fn attach_bot_sprite(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::map::TileMap;
+    use crate::game::player::Player;
 
     /// Regression: with no players left alive, surviving bots must hunt *each
     /// other* (not give up with `target = None`), otherwise multiple bots stay
@@ -357,5 +443,59 @@ mod tests {
 
         assert_eq!(app.world().get::<BotAI>(a).unwrap().target, Some(b));
         assert_eq!(app.world().get::<BotAI>(b).unwrap().target, Some(a));
+    }
+
+    /// With a wall between the bot and its target, the bot should pathfind
+    /// through the gap rather than walking straight into the wall.
+    #[test]
+    fn bot_routes_around_wall_to_target() {
+        let map = TileMap::parse(
+            "wwwww\n\
+             wxxww\n\
+             wwxww\n\
+             wxxww\n\
+             wwwww",
+        );
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(CurrentMap(map.clone()));
+        app.insert_resource(map.bounds());
+        app.add_systems(
+            Update,
+            (select_bot_targets, update_bot_paths, update_bot_intent).chain(),
+        );
+
+        let start = map.cell_center(1, 1);
+        let goal = map.cell_center(1, 3);
+
+        let bot = app
+            .world_mut()
+            .spawn((
+                Bot,
+                BotAI {
+                    target: None,
+                    wander: Vec2::X,
+                },
+                BotPath {
+                    waypoints: Vec::new(),
+                    next: 0,
+                    timer: Timer::from_seconds(0.25, TimerMode::Repeating),
+                    last_target: None,
+                },
+                BotIntent::default(),
+                NetPos(start),
+            ))
+            .id();
+        app.world_mut().spawn((Player, NetPos(goal)));
+
+        app.update();
+
+        let intent = app.world().get::<BotIntent>(bot).unwrap();
+        assert!(
+            intent.0.x > 0.0,
+            "bot should detour right around the wall, intent = {:?}",
+            intent.0
+        );
     }
 }

@@ -217,9 +217,14 @@ impl TileMap {
         self.song
     }
 
+    /// Grid dimensions as `(width, height)`.
+    pub fn dimensions(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
     /// World-space centre of cell `(col, row)`. Row 0 is the top of the file,
     /// which maps to the top (`+y`) of the world.
-    fn cell_center(&self, col: usize, row: usize) -> Vec2 {
+    pub(crate) fn cell_center(&self, col: usize, row: usize) -> Vec2 {
         let size = self.world_size();
         Vec2::new(
             -size.x / 2.0 + (col as f32 + 0.5) * TILE_SIZE,
@@ -229,7 +234,7 @@ impl TileMap {
 
     /// Tile at signed coordinates; anything out of bounds reads as [`Tile::Void`]
     /// so that walls on the map edge cap themselves correctly.
-    fn tile_at(&self, col: i32, row: i32) -> Tile {
+    pub(crate) fn tile_at(&self, col: i32, row: i32) -> Tile {
         if col < 0 || row < 0 || col >= self.width as i32 || row >= self.height as i32 {
             Tile::Void
         } else {
@@ -243,7 +248,7 @@ impl TileMap {
     }
 
     /// Converts a world-space position into the grid cell that contains it.
-    fn world_to_cell(&self, pos: Vec2) -> (i32, i32) {
+    pub(crate) fn world_to_cell(&self, pos: Vec2) -> (i32, i32) {
         let size = self.world_size();
         let col = ((pos.x + size.x / 2.0) / TILE_SIZE).floor() as i32;
         let row = ((size.y / 2.0 - pos.y) / TILE_SIZE).floor() as i32;
