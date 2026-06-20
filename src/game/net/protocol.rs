@@ -19,15 +19,34 @@ use serde::{Deserialize, Serialize};
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct NetPos(pub Vec2);
 
-/// Movement request sent from a client to the server every frame.
+/// Movement request sent from a client to the server once per fixed tick.
 ///
 /// `dir` is the (already normalized) desired movement direction, or zero when
-/// the player is standing still. Sent unreliably: we transmit it every frame,
-/// so a dropped packet simply self-heals on the next one.
+/// the player is standing still. `seq` is a per-client monotonic input counter
+/// (one per fixed tick) used by client-side prediction: the server echoes the
+/// last applied `seq` back via [`LastProcessedInput`] so the client knows which
+/// of its buffered inputs are acknowledged and which to replay. Sent unreliably:
+/// a dropped packet self-heals on the next tick (reconciliation absorbs the gap).
 #[derive(Event, Serialize, Deserialize, Clone, Copy, Debug, Default)]
 pub struct PlayerInput {
     pub dir: Vec2,
+    pub seq: u32,
 }
+
+/// Replicated onto each player: the `seq` of the most recent [`PlayerInput`] the
+/// server has applied to that player. The controlling client reads this on its
+/// own player to discard acknowledged inputs and replay the rest during
+/// reconciliation. Authoritative-written, replicated to all clients.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
+pub struct LastProcessedInput(pub u32);
+
+/// Replicated onto each player: the messaging-backend id (renet `NetworkId`) of
+/// the client that controls it. A client identifies *its own* player by matching
+/// this against its local `NetcodeClientTransport::client_id()`, then predicts
+/// only that entity. Replicated (rides the replication stream, so unlike a
+/// directed event it can't lose the spawn race).
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
+pub struct ControllingClient(pub u64);
 
 /// Fire request sent from a client to the server when the player presses shoot.
 ///

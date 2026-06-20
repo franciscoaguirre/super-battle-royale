@@ -5,6 +5,7 @@
 //! [`Dead`] marker lets clients hide a player or bot during their respawn
 //! delay. Everything here runs on the authoritative side (server + offline).
 
+use bevy::ecs::component::Mutable;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +24,8 @@ use super::state::GameState;
 const MAX_HEALTH: f32 = 2.0;
 /// Damage one shot deals on contact.
 const PROJECTILE_DAMAGE: f32 = 1.0;
+/// Multiplier applied to a shot's damage while its owner holds [`DamageBoost`].
+const DAMAGE_FACTOR: f32 = 2.0;
 /// Seconds a player stays dead before respawning.
 const RESPAWN_DELAY: f32 = 2.0;
 /// Seconds of invulnerability after spawning or respawning.
@@ -78,6 +81,7 @@ struct HitResolution {
     owner: Entity,
     hit_pos: Vec2,
     kind: HitKind,
+    damage: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -85,6 +89,70 @@ enum HitKind {
     Damage,
     Parry,
     Block,
+}
+
+/// A timed power-up effect. Each buff is a newtype around a [`Timer`] that lives
+/// on a player while the effect is active; [`tick_buff`] ticks it and removes the
+/// component when the timer runs out, so "buffed" is simply "the component is
+/// present" — systems honour a buff by querying `Option<&Buff>` / `With<Buff>`.
+/// Buffs are authoritative-only (their *results* — position, health, projectiles
+/// — already replicate), and granted by `pickup::collect_pickups`.
+pub trait BuffTimer {
+    fn timer(&mut self) -> &mut Timer;
+}
+
+/// Defines a timed-buff component (a `Timer` newtype) and its [`BuffTimer`] impl.
+macro_rules! buff {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Component, Debug)]
+        pub struct $name(pub Timer);
+
+        impl BuffTimer for $name {
+            fn timer(&mut self) -> &mut Timer {
+                &mut self.0
+            }
+        }
+    };
+}
+
+buff!(
+    /// Multiplies the holder's movement speed (see `player::apply_player_intent`).
+    SpeedBoost
+);
+buff!(
+    /// Speeds up the holder's fire rate (see `projectile::tick_cooldowns`).
+    RapidFire
+);
+buff!(
+    /// Multiplies the damage of shots the holder fires (see `apply_projectile_hits`).
+    DamageBoost
+);
+buff!(
+    /// Makes the holder fire forward *and* backward (see `projectile::try_fire`).
+    DoubleShot
+);
+buff!(
+    /// Makes the holder fire in a four-way cross (see `projectile::try_fire`).
+    QuadShot
+);
+buff!(
+    /// Makes the holder's shots weave from side to side (see `projectile::simulate_projectiles`).
+    Zigzag
+);
+
+/// Ticks one kind of timed buff and strips it from any entity whose timer has
+/// run out, so buffs expire on their own. Registered once per buff type.
+fn tick_buff<B: Component<Mutability = Mutable> + BuffTimer>(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut query: Query<(Entity, &mut B)>,
+) {
+    for (entity, mut buff) in &mut query {
+        if buff.timer().tick(time.delta()).just_finished() {
+            commands.entity(entity).remove::<B>();
+        }
+    }
 }
 
 pub struct CombatPlugin;
@@ -106,6 +174,22 @@ impl Plugin for CombatPlugin {
                 tick_respawns,
             )
                 .chain()
+                .run_if(in_state(GameState::Playing))
+                .run_if(is_authoritative),
+        );
+
+        // Authoritative: expire timed power-up buffs once their timers run out.
+        // Unordered — a one-frame-stale buff is imperceptible.
+        app.add_systems(
+            Update,
+            (
+                tick_buff::<SpeedBoost>,
+                tick_buff::<RapidFire>,
+                tick_buff::<DamageBoost>,
+                tick_buff::<DoubleShot>,
+                tick_buff::<QuadShot>,
+                tick_buff::<Zigzag>,
+            )
                 .run_if(in_state(GameState::Playing))
                 .run_if(is_authoritative),
         );
@@ -163,18 +247,24 @@ fn apply_projectile_hits(
     mut commands: Commands,
     time: Res<Time>,
     projectiles: Query<(Entity, &NetPos, &ProjectileOwner), With<Projectile>>,
+    boosted: Query<(), With<DamageBoost>>,
     mut targets: ParamSet<(
         Query<
-            (Entity, &NetPos, &ShieldState),
+            (Entity, &NetPos, Option<&ShieldState>),
             (With<Player>, Without<Dead>, Without<SpawnInvulnerability>),
         >,
         Query<
-            (Entity, &NetPos, &ShieldState),
+            (Entity, &NetPos, Option<&ShieldState>),
             (With<Bot>, Without<Dead>, Without<SpawnInvulnerability>),
         >,
     )>,
 ) {
     for (projectile, projectile_pos, owner) in &projectiles {
+        let base_damage = if boosted.contains(owner.0) {
+            PROJECTILE_DAMAGE * DAMAGE_FACTOR
+        } else {
+            PROJECTILE_DAMAGE
+        };
         let mut resolution = None;
 
         for (player, player_pos, shield) in targets.p0() {
@@ -188,6 +278,7 @@ fn apply_projectile_hits(
                     player,
                     player_pos.0,
                     owner.0,
+                    base_damage,
                 ));
                 break;
             }
@@ -199,7 +290,14 @@ fn apply_projectile_hits(
                     continue;
                 }
                 if projectile_pos.0.distance(bot_pos.0) <= HIT_RADIUS {
-                    resolution = Some(build_resolution(&time, shield, bot, bot_pos.0, owner.0));
+                    resolution = Some(build_resolution(
+                        &time,
+                        shield,
+                        bot,
+                        bot_pos.0,
+                        owner.0,
+                        base_damage,
+                    ));
                     break;
                 }
             }
@@ -214,12 +312,15 @@ fn apply_projectile_hits(
 /// Builds a [`HitResolution`] for a projectile that reached a live target.
 fn build_resolution(
     time: &Time,
-    shield: &ShieldState,
+    shield: Option<&ShieldState>,
     target: Entity,
     target_pos: Vec2,
     owner: Entity,
+    damage: f32,
 ) -> HitResolution {
-    let kind = if matches!(shield.status, super::shield::ShieldStatus::Active { .. }) {
+    let kind = if let Some(shield) = shield
+        && matches!(shield.status, super::shield::ShieldStatus::Active { .. })
+    {
         if is_parry_window(shield, time) {
             HitKind::Parry
         } else {
@@ -233,6 +334,7 @@ fn build_resolution(
         owner,
         hit_pos: target_pos,
         kind,
+        damage,
     }
 }
 
@@ -249,11 +351,11 @@ fn apply_damage_and_blocks(
         match resolution.kind {
             HitKind::Damage => {
                 if let Ok(mut health) = targets.get_mut(resolution.target) {
-                    let kill_shot = health.current - PROJECTILE_DAMAGE <= 0.0;
+                    let kill_shot = health.current - resolution.damage <= 0.0;
                     if kill_shot {
                         commands.entity(resolution.owner).insert(HealOnKill(1.0));
                     }
-                    health.current -= PROJECTILE_DAMAGE;
+                    health.current -= resolution.damage;
                     spawn_impact(&mut commands, ImpactKind::Object, resolution.hit_pos);
                 }
                 commands.entity(entity).despawn();

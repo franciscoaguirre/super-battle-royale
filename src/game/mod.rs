@@ -3,6 +3,7 @@ pub mod combat;
 pub mod map;
 pub mod music;
 pub mod net;
+pub mod pickup;
 pub mod player;
 pub mod projectile;
 pub mod shield;
@@ -41,10 +42,14 @@ impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         app.init_state::<GameState>()
             .init_resource::<MatchConfig>()
+            // Run the fixed simulation step (player movement + prediction) at the
+            // server's 60 Hz loop rate, so client replay matches server steps.
+            .insert_resource(Time::<Fixed>::from_hz(60.0))
             .add_plugins((
                 combat::CombatPlugin,
                 bot::BotPlugin,
                 map::MapPlugin,
+                pickup::PickupPlugin,
                 player::PlayerPlugin,
                 projectile::ProjectilePlugin,
                 shield::ShieldPlugin,

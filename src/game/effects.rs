@@ -35,6 +35,7 @@ const ABERRATION_DECAY: f32 = 0.4;
 // Impact glow colors (linear HDR so they bloom).
 const GROUND_GLOW: Color = Color::linear_rgb(4.0, 2.6, 1.0);
 const OBJECT_GLOW: Color = Color::linear_rgb(8.0, 8.0, 8.0);
+const PICKUP_GLOW: Color = Color::linear_rgb(8.0, 7.0, 2.5);
 
 /// Screen-feedback accumulators, decayed every frame and applied to the camera.
 #[derive(Resource, Default)]
@@ -95,17 +96,17 @@ fn init_fx_textures(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.insert_resource(FxTextures { dot, ring });
 }
 
-/// Creates a `size`x`size` white RGBA texture whose alpha is `profile(radius)`,
-/// with radius 0 at the centre and 1 at the edge.
-fn make_radial(size: usize, profile: impl Fn(f32) -> f32) -> Image {
+/// Creates a `size`x`size` white RGBA texture whose alpha is `alpha_at(p)`, with
+/// `p` ranging over normalized coordinates in `[-1, 1]` on each axis (centre at
+/// the origin). Shared with `pickup` for procedural power-up glyphs.
+pub(crate) fn make_texture(size: usize, alpha_at: impl Fn(Vec2) -> f32) -> Image {
     let mut data = vec![0u8; size * size * 4];
     let half = size as f32 / 2.0;
     for y in 0..size {
         for x in 0..size {
             let nx = (x as f32 + 0.5 - half) / half;
             let ny = (y as f32 + 0.5 - half) / half;
-            let r = (nx * nx + ny * ny).sqrt();
-            let alpha = (profile(r) * 255.0).clamp(0.0, 255.0) as u8;
+            let alpha = (alpha_at(Vec2::new(nx, ny)) * 255.0).clamp(0.0, 255.0) as u8;
             let i = (y * size + x) * 4;
             data[i] = 255;
             data[i + 1] = 255;
@@ -124,6 +125,12 @@ fn make_radial(size: usize, profile: impl Fn(f32) -> f32) -> Image {
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
     )
+}
+
+/// Creates a `size`x`size` white RGBA texture whose alpha is `profile(radius)`,
+/// with radius 0 at the centre and 1 at the edge.
+pub(crate) fn make_radial(size: usize, profile: impl Fn(f32) -> f32) -> Image {
+    make_texture(size, move |p| profile(p.length()))
 }
 
 /// Spawns sparks + a shockwave (and shakes the screen) wherever a shot ended.
@@ -152,6 +159,12 @@ fn spawn_impact_effects(
                 spawn_sparks(&mut commands, &textures.dot, pos.0, OBJECT_GLOW, 6, 100.0);
                 spawn_shockwave(&mut commands, &textures.ring, pos.0, OBJECT_GLOW);
                 feedback.trauma = (feedback.trauma + 0.15).min(1.0);
+            }
+            ImpactKind::Pickup => {
+                // A small celebratory burst where a power-up was collected.
+                spawn_sparks(&mut commands, &textures.dot, pos.0, PICKUP_GLOW, 10, 130.0);
+                spawn_shockwave(&mut commands, &textures.ring, pos.0, PICKUP_GLOW);
+                feedback.trauma = (feedback.trauma + 0.12).min(1.0);
             }
         }
     }

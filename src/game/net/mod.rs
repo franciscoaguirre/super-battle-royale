@@ -23,7 +23,8 @@ pub mod client;
 pub mod server;
 
 pub use protocol::{
-    MatchInfo, NetPos, Owner, PlayerInput, ShieldRequest, ShootRequest, StartMatch, YouAreOwner,
+    ControllingClient, LastProcessedInput, MatchInfo, NetPos, Owner, PlayerInput, ShieldRequest,
+    ShootRequest, StartMatch, YouAreOwner,
 };
 
 use bevy::prelude::*;
@@ -31,6 +32,7 @@ use bevy_replicon::prelude::*;
 
 use super::bot::Bot;
 use super::combat::{Dead, Health, SpawnInvulnerability};
+use super::pickup::PickupKind;
 use super::player::{Player, PlayerColor};
 use super::projectile::{Height, Impact, Projectile, ShotColor};
 use super::shield::{ShieldCharge, Shielding};
@@ -101,6 +103,9 @@ pub fn register_protocol(app: &mut App) {
         .replicate::<Shielding>()
         .replicate::<ShieldCharge>()
         .replicate::<SpawnInvulnerability>()
+        .replicate::<PickupKind>()
+        .replicate::<LastProcessedInput>()
+        .replicate::<ControllingClient>()
         .add_client_event::<PlayerInput>(Channel::Unreliable)
         .add_client_event::<ShootRequest>(Channel::Ordered)
         .add_client_event::<ShieldRequest>(Channel::Ordered)
@@ -152,28 +157,46 @@ mod tests {
     }
 }
 
+/// Client-only marker on the player entity this client controls (see
+/// [`client`](crate::game::net::client)). Its movement is predicted locally and
+/// reconciled against the server, so it renders from [`PredictedPos`] rather than
+/// the replicated [`NetPos`].
+#[cfg(feature = "client")]
+#[derive(Component)]
+pub struct Predicted;
+
+/// Client-only predicted position of the local player, advanced from local input
+/// each fixed tick and reconciled against the confirmed [`NetPos`]. Rendered in
+/// place of `NetPos` for the [`Predicted`] entity.
+#[cfg(feature = "client")]
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct PredictedPos(pub Vec2);
+
 /// Copies the authoritative [`NetPos`] into the render [`Transform`] for every
-/// dynamic entity. Offline positions are local and exact, so they snap; online
-/// positions arrive at the server tick rate, so they are interpolated for
-/// smoothness. The `z` set when the sprite was attached is preserved.
+/// dynamic entity. The local [`Predicted`] player instead renders from its
+/// [`PredictedPos`] (so it reacts to input with no round-trip), smoothed snappily
+/// to absorb reconciliation corrections. Offline positions snap; remote online
+/// positions arrive at the tick rate and are interpolated. The `z` set when the
+/// sprite was attached is preserved.
 #[cfg(feature = "client")]
 pub fn sync_netpos_to_transform(
     role: Res<NetRole>,
     time: Res<Time>,
     // Projectiles carry an altitude and are positioned by `render_projectiles`.
-    mut query: Query<(&NetPos, &mut Transform), Without<Projectile>>,
+    mut query: Query<(&NetPos, Option<&PredictedPos>, &mut Transform), Without<Projectile>>,
 ) {
     let online = *role == NetRole::OnlineClient;
-    for (pos, mut transform) in &mut query {
-        let target = pos.0;
-        if online {
-            let factor = (15.0 * time.delta_secs()).min(1.0);
-            let smoothed = transform.translation.truncate().lerp(target, factor);
-            transform.translation.x = smoothed.x;
-            transform.translation.y = smoothed.y;
-        } else {
-            transform.translation.x = target.x;
-            transform.translation.y = target.y;
-        }
+    for (pos, predicted, mut transform) in &mut query {
+        // The controlled player follows its predicted position (snappy); every
+        // other entity follows the replicated position (lerped online, snapped
+        // offline).
+        let (target, factor) = match predicted {
+            Some(predicted) => (predicted.0, (30.0 * time.delta_secs()).min(1.0)),
+            None if online => (pos.0, (15.0 * time.delta_secs()).min(1.0)),
+            None => (pos.0, 1.0),
+        };
+        let smoothed = transform.translation.truncate().lerp(target, factor);
+        transform.translation.x = smoothed.x;
+        transform.translation.y = smoothed.y;
     }
 }
