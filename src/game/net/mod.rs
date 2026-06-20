@@ -34,7 +34,7 @@ use super::bot::Bot;
 use super::combat::{Dead, Health, SpawnInvulnerability};
 use super::pickup::PickupKind;
 use super::player::{Player, PlayerColor};
-use super::projectile::{Height, Impact, Projectile, ShotColor};
+use super::projectile::{Impact, Projectile, ShotColor};
 use super::shield::{ShieldCharge, Shielding};
 
 /// Default UDP port the server listens on and clients connect to.
@@ -94,7 +94,6 @@ pub fn register_protocol(app: &mut App) {
         .replicate::<Health>()
         .replicate::<Bot>()
         .replicate::<Projectile>()
-        .replicate::<Height>()
         .replicate::<ShotColor>()
         .replicate::<Impact>()
         .replicate::<Dead>()

@@ -14,8 +14,13 @@ use super::state::{GameState, MatchConfig};
 
 pub const BOT_SIZE: f32 = 32.0;
 const BOT_SPEED: f32 = 180.0;
-const BOT_DETECTION_RANGE: f32 = 500.0;
-const BOT_FIRE_RANGE: f32 = 280.0;
+/// How far a bot will acquire a target to hunt. Caps [`BOT_FIRE_RANGE`], since a
+/// bot only shoots at a target it has already acquired.
+const BOT_DETECTION_RANGE: f32 = 1100.0;
+/// How close an acquired target must be before the bot opens fire. Kept just
+/// under the detection range so bots start shooting as soon as they spot someone,
+/// matching the now full-map shot range.
+const BOT_FIRE_RANGE: f32 = 1000.0;
 const BOT_AIM_THRESHOLD: f32 = 0.95;
 /// Distance at which a bot considers an incoming shot dangerous enough to raise
 /// its shield.

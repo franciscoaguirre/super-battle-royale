@@ -32,7 +32,7 @@ use super_battle_royale::game::net::{
 };
 use super_battle_royale::game::pickup::PickupKind;
 use super_battle_royale::game::player::{Player, PlayerColor};
-use super_battle_royale::game::projectile::{Height, Projectile};
+use super_battle_royale::game::projectile::Projectile;
 
 const PLAYER_POS: Vec2 = Vec2::new(12.0, -34.0);
 const BOT_POS: Vec2 = Vec2::new(-5.0, 7.0);
@@ -240,12 +240,11 @@ fn replicates_pickups() {
 struct Sent(bool);
 
 /// Drives the shoot client-event end to end: the client sends a `ShootRequest`,
-/// the server reacts by spawning a projectile, and that projectile (with its
-/// altitude) replicates back to the client.
+/// the server reacts by spawning a projectile, and that projectile replicates
+/// back to the client at its `NetPos`.
 #[test]
 fn fires_and_replicates_projectile() {
     const SHOT_POS: Vec2 = Vec2::new(3.0, 4.0);
-    const SHOT_HEIGHT: f32 = 25.0;
 
     let mut server_app = build_app();
     let mut client_app = build_app();
@@ -253,12 +252,7 @@ fn fires_and_replicates_projectile() {
     // Server: on a shoot request, spawn a replicated projectile.
     server_app.add_observer(
         move |_req: On<FromClient<ShootRequest>>, mut commands: Commands| {
-            commands.spawn((
-                Projectile,
-                NetPos(SHOT_POS),
-                Height(SHOT_HEIGHT),
-                Replicated,
-            ));
+            commands.spawn((Projectile, NetPos(SHOT_POS), Replicated));
         },
     );
 
@@ -285,11 +279,11 @@ fn fires_and_replicates_projectile() {
 
     let mut projectiles = client_app
         .world_mut()
-        .query_filtered::<&Height, With<Projectile>>();
-    let height = projectiles
+        .query_filtered::<&NetPos, With<Projectile>>();
+    let pos = projectiles
         .single(client_app.world())
         .expect("client should see exactly one replicated projectile");
-    assert_eq!(height.0, SHOT_HEIGHT);
+    assert_eq!(pos.0, SHOT_POS);
 }
 
 /// Exercises the authoritative combat loop directly (no networking): a shot
@@ -335,7 +329,6 @@ fn projectile_damages_and_kills_non_owner() {
         NetPos(Vec2::ZERO),
         ProjectileVelocity {
             horizontal: Vec2::X,
-            vertical: 0.0,
         },
     ));
     app.update();
@@ -355,7 +348,6 @@ fn projectile_damages_and_kills_non_owner() {
         NetPos(Vec2::ZERO),
         ProjectileVelocity {
             horizontal: Vec2::X,
-            vertical: 0.0,
         },
     ));
     app.update();
@@ -419,7 +411,6 @@ fn projectile_damages_and_kills_bot() {
         NetPos(Vec2::ZERO),
         ProjectileVelocity {
             horizontal: Vec2::X,
-            vertical: 0.0,
         },
     ));
     app.update();
@@ -433,7 +424,6 @@ fn projectile_damages_and_kills_bot() {
         NetPos(Vec2::ZERO),
         ProjectileVelocity {
             horizontal: Vec2::X,
-            vertical: 0.0,
         },
     ));
     app.update();
@@ -508,7 +498,6 @@ fn shield_parry_reflects_projectile() {
             NetPos(Vec2::ZERO),
             ProjectileVelocity {
                 horizontal: Vec2::X,
-                vertical: 0.0,
             },
         ))
         .id();
@@ -586,7 +575,6 @@ fn shield_blocks_after_parry_window() {
             NetPos(Vec2::ZERO),
             ProjectileVelocity {
                 horizontal: Vec2::X,
-                vertical: 0.0,
             },
         ))
         .id();
@@ -643,7 +631,6 @@ fn kill_heals_owner_by_one() {
         NetPos(Vec2::ZERO),
         ProjectileVelocity {
             horizontal: Vec2::X,
-            vertical: 0.0,
         },
     ));
     app.update();
@@ -665,7 +652,6 @@ fn kill_heals_owner_by_one() {
         NetPos(Vec2::ZERO),
         ProjectileVelocity {
             horizontal: Vec2::X,
-            vertical: 0.0,
         },
     ));
     app.update();
@@ -720,7 +706,6 @@ fn spawn_invulnerability_protects_for_two_seconds() {
         NetPos(Vec2::ZERO),
         ProjectileVelocity {
             horizontal: Vec2::X,
-            vertical: 0.0,
         },
     ));
     app.update();
@@ -752,7 +737,6 @@ fn spawn_invulnerability_protects_for_two_seconds() {
         NetPos(Vec2::ZERO),
         ProjectileVelocity {
             horizontal: Vec2::X,
-            vertical: 0.0,
         },
     ));
     app.update();
