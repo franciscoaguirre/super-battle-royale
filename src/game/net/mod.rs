@@ -23,8 +23,8 @@ pub mod client;
 pub mod server;
 
 pub use protocol::{
-    ControllingClient, LastProcessedInput, MatchInfo, NetPos, Owner, PlayerInput, ShieldRequest,
-    ShootRequest, StartMatch, YouAreOwner,
+    ControllingClient, LastProcessedInput, MatchInfo, MatchPhase, NetPos, Owner, PlayerInput,
+    ShieldRequest, ShootRequest, StartMatch, Winner, YouAreOwner,
 };
 
 use bevy::prelude::*;

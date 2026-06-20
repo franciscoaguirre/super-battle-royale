@@ -261,6 +261,9 @@ fn attach_player_sprite(
     query: Query<(Entity, &PlayerColor, &NetPos), (With<Player>, Without<Sprite>)>,
 ) {
     for (entity, color, pos) in &query {
+        // No `InGame`: players are replicated/persistent online (replicon owns
+        // their lifecycle) and re-spawned offline; tagging them would let the
+        // map-switch cleanup wrongly despawn them.
         commands.entity(entity).insert((
             Sprite {
                 image: asset_server.load(color.asset_path()),
@@ -268,7 +271,6 @@ fn attach_player_sprite(
                 ..default()
             },
             Transform::from_xyz(pos.0.x, pos.0.y, 10.0),
-            super::InGame,
         ));
     }
 }
@@ -304,7 +306,8 @@ fn attach_health_cracks(
                     Transform::from_xyz(0.0, 0.0, 0.1),
                     Visibility::Hidden,
                     HealthCrack(stage),
-                    super::InGame,
+                    // No `InGame`: these are children of a player/bot and despawn
+                    // recursively with their (replicated/persistent) parent.
                 ))
                 .id();
             children.push(child);

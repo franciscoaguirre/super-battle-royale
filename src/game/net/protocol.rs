@@ -9,6 +9,8 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::game::player::PlayerColor;
+
 /// Authoritative world-space position of a dynamic entity (player or bot).
 ///
 /// This is the single source of truth for position in *all* modes: the server
@@ -74,14 +76,44 @@ pub struct ShieldRequest {
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
 pub struct Owner;
 
-/// Replicated singleton spawned by the authoritative side when the match starts.
-/// Its presence is the "match has begun" signal for online clients, and its
-/// `map_index` tells them which map to load locally (the map itself is never
-/// replicated). Must not carry `InGame`, or it would be despawned on the
-/// `Playing → Lobby`-style cleanup.
+/// Replicated singleton owned by the authoritative side: the live match state.
+/// It is the cross-network "what should I be doing" signal — online clients
+/// mirror their local [`GameState`](crate::game::state::GameState) from it (load
+/// `map_index`, show the winner, advance maps). Spawned once when the first match
+/// starts and mutated thereafter (never re-spawned). Must not carry `InGame`, or
+/// it would be despawned on a state-exit cleanup.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
 pub struct MatchInfo {
+    /// Which map (index into [`MAPS`](crate::game::map::MAPS)) the current round uses.
     pub map_index: u8,
+    /// Increments each time a new level starts, so clients detect "switch map".
+    pub round: u32,
+    /// Whether the round is live or has ended (winner announced).
+    pub phase: MatchPhase,
+    /// Who won the last round; meaningful while `phase == Ended`.
+    pub winner: Winner,
+}
+
+/// The live/ended state of the current round (a field of [`MatchInfo`]).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MatchPhase {
+    /// The round is being played.
+    #[default]
+    Playing,
+    /// The round is over and the winner is being announced.
+    Ended,
+}
+
+/// The outcome of a round (a field of [`MatchInfo`]).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Winner {
+    /// Nobody survived (the last combatants died together).
+    #[default]
+    Draw,
+    /// A human player survived, identified by their color.
+    Player(PlayerColor),
+    /// A bot survived.
+    Bot,
 }
 
 /// Sent by the owner's client to ask the server to start the match with the

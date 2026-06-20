@@ -1,6 +1,7 @@
 pub mod bot;
 pub mod combat;
 pub mod map;
+pub mod match_flow;
 pub mod music;
 pub mod net;
 pub mod pickup;
@@ -49,12 +50,16 @@ impl Plugin for GamePlugin {
                 combat::CombatPlugin,
                 bot::BotPlugin,
                 map::MapPlugin,
+                match_flow::MatchFlowPlugin,
                 pickup::PickupPlugin,
                 player::PlayerPlugin,
                 projectile::ProjectilePlugin,
                 shield::ShieldPlugin,
             ))
-            .add_systems(OnExit(GameState::Playing), cleanup_ingame);
+            // Cleanup runs when LEAVING the GameOver announcement (the map-switch
+            // point), not on leaving Playing — so the scene stays frozen and
+            // visible behind the winner banner during GameOver.
+            .add_systems(OnExit(GameState::GameOver), cleanup_ingame);
 
         #[cfg(feature = "client")]
         app.add_plugins((

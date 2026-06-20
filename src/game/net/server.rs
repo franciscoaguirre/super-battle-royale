@@ -18,8 +18,9 @@ use bevy_replicon_renet::{
 };
 
 use super::{
-    ControllingClient, LastProcessedInput, MatchInfo, NetPos, Owner, PlayerInput, ShieldRequest,
-    ShootRequest, StartMatch, YouAreOwner, is_server, protocol_id_for, register_protocol,
+    ControllingClient, LastProcessedInput, MatchInfo, MatchPhase, NetPos, Owner, PlayerInput,
+    ShieldRequest, ShootRequest, StartMatch, Winner, YouAreOwner, is_server, protocol_id_for,
+    register_protocol,
 };
 use crate::game::combat::{
     Dead, DoubleShot, QuadShot, SpawnInvulnerability, Zigzag, give_spawn_invulnerability,
@@ -227,6 +228,9 @@ fn on_start_match(
     commands.spawn((
         MatchInfo {
             map_index: req.map_index,
+            round: 0,
+            phase: MatchPhase::Playing,
+            winner: Winner::Draw,
         },
         Replicated,
     ));

@@ -1,16 +1,15 @@
 //! Combat: shots damage players and bots, who die and respawn.
 //!
 //! Both human players and AI bots take damage from projectiles they do not
-//! own. Health and respawn timing are server/sim-only; a small replicated
-//! [`Dead`] marker lets clients hide a player or bot during their respawn
-//! delay. Everything here runs on the authoritative side (server + offline).
+//! own. Health is server/sim-only; a small replicated [`Dead`] marker lets
+//! clients hide a player or bot during their respawn delay. Everything here
+//! runs on the authoritative side (server + offline).
 
 use bevy::ecs::component::Mutable;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::bot::Bot;
-use super::map::CurrentMap;
 use super::net::{NetPos, is_authoritative};
 use super::player::{PLAYER_SIZE, Player};
 use super::projectile::{
@@ -26,8 +25,6 @@ const MAX_HEALTH: f32 = 2.0;
 const PROJECTILE_DAMAGE: f32 = 1.0;
 /// Multiplier applied to a shot's damage while its owner holds [`DamageBoost`].
 const DAMAGE_FACTOR: f32 = 2.0;
-/// Seconds a player stays dead before respawning.
-const RESPAWN_DELAY: f32 = 2.0;
 /// Seconds of invulnerability after spawning or respawning.
 const SPAWN_INVULNERABILITY_DURATION: f32 = 2.0;
 /// A shot hits a player when their centres are within this distance.
@@ -49,14 +46,11 @@ impl Health {
     }
 }
 
-/// Replicated marker present while a player or bot is dead and awaiting
-/// respawn, so clients can hide them.
+/// Replicated marker present while a player or bot is dead. Death is permanent
+/// for the round — a `Dead` combatant stays down (hidden, can't move or shoot)
+/// until the next level, when [`reset_combatants`] revives the persistent ones.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
 pub struct Dead;
-
-/// Server/sim-only countdown until a dead player or bot respawns.
-#[derive(Component)]
-struct RespawnTimer(Timer);
 
 /// Replicated marker: the player or bot is invulnerable after spawning or
 /// respawning. Removed once `remaining` reaches zero.
@@ -159,8 +153,9 @@ pub struct CombatPlugin;
 
 impl Plugin for CombatPlugin {
     fn build(&self, app: &mut App) {
-        // Authoritative: give players health, resolve hits, handle death/respawn.
-        // Chained so damage → death → respawn settle within a single frame.
+        // Authoritative: give players health and resolve hits → death. Chained so
+        // damage and death settle within a single frame. Death is permanent for
+        // the round (no respawn); combatants are revived on the next level.
         app.add_systems(
             Update,
             (
@@ -171,11 +166,15 @@ impl Plugin for CombatPlugin {
                 apply_parry_reflections,
                 apply_pending_heals,
                 handle_deaths,
-                tick_respawns,
             )
                 .chain()
                 .run_if(in_state(GameState::Playing))
                 .run_if(is_authoritative),
+        )
+        // Revive survivors (persistent online players) when a new round starts.
+        .add_systems(
+            OnEnter(GameState::Playing),
+            reset_combatants.run_if(is_authoritative),
         );
 
         // Authoritative: expire timed power-up buffs once their timers run out.
@@ -413,68 +412,40 @@ fn apply_pending_heals(
     }
 }
 
-/// Marks players or bots whose health has run out as dead, starts their
-/// respawn timer, and drops any active shield so they don't respawn shielded.
+/// Marks players or bots whose health has run out as dead. Permanent for the
+/// round — there is no respawn; the `Dead` marker stays until the next level.
 #[allow(clippy::type_complexity)]
 fn handle_deaths(
     mut commands: Commands,
-    mut entities: Query<
-        (Entity, &Health, &mut ShieldState),
-        (Or<(With<Player>, With<Bot>)>, Without<Dead>),
-    >,
+    entities: Query<(Entity, &Health), (Or<(With<Player>, With<Bot>)>, Without<Dead>)>,
+    mut shields: Query<&mut ShieldState>,
 ) {
-    for (entity, health, mut state) in &mut entities {
+    for (entity, health) in &entities {
         if health.current <= 0.0 {
             commands.entity(entity).remove::<super::shield::Shielding>();
-            state.status = super::shield::ShieldStatus::Ready;
-            state.charge = 1.0;
-            state.requested = false;
-            commands.entity(entity).insert((
-                Dead,
-                RespawnTimer(Timer::from_seconds(RESPAWN_DELAY, TimerMode::Once)),
-            ));
+            if let Ok(mut state) = shields.get_mut(entity) {
+                state.status = super::shield::ShieldStatus::Ready;
+                state.charge = 1.0;
+                state.requested = false;
+            }
+            commands.entity(entity).insert(Dead);
         }
     }
 }
 
-/// Respawns dead players or bots once their timer elapses: relocate to a
-/// spawn point, refill health, clear the dead state, and grant spawn
-/// invulnerability.
+/// Revives every combatant carried over from a previous round (the persistent
+/// online players) when a new round starts: full health and `Dead` cleared.
+/// Fresh bots and the offline player are re-spawned each round and get full
+/// health from [`ensure_health`] instead; positions are set by `position_players`
+/// / `spawn_*`. Harmless on the first round (nothing has `Health` yet).
 #[allow(clippy::type_complexity)]
-fn tick_respawns(
-    time: Res<Time>,
-    map: Res<CurrentMap>,
+fn reset_combatants(
     mut commands: Commands,
-    mut entities: Query<
-        (
-            Entity,
-            &mut NetPos,
-            &mut Health,
-            &mut RespawnTimer,
-            &mut ShieldState,
-        ),
-        Or<(With<Player>, With<Bot>)>,
-    >,
+    mut combatants: Query<(Entity, &mut Health), Or<(With<Player>, With<Bot>)>>,
 ) {
-    for (entity, mut pos, mut health, mut timer, mut state) in &mut entities {
-        if timer.0.tick(time.delta()).just_finished() {
-            let spawns = map.0.spawn_points();
-            if !spawns.is_empty() {
-                pos.0 = spawns[entity.to_bits() as usize % spawns.len()];
-            }
-            health.current = health.max;
-            // Make sure the actor respawns without a stale shield request or marker.
-            commands
-                .entity(entity)
-                .remove::<(Dead, RespawnTimer, super::shield::Shielding)>();
-            state.status = super::shield::ShieldStatus::Ready;
-            state.charge = 1.0;
-            state.requested = false;
-            commands.entity(entity).insert(SpawnInvulnerability {
-                remaining: SPAWN_INVULNERABILITY_DURATION,
-                max: SPAWN_INVULNERABILITY_DURATION,
-            });
-        }
+    for (entity, mut health) in &mut combatants {
+        health.current = health.max;
+        commands.entity(entity).remove::<Dead>();
     }
 }
 
