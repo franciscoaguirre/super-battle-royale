@@ -4,11 +4,13 @@
 //! Enemies are spawned by the regular [`BotPlugin`](crate::game::bot) on the
 //! authoritative side, so this module only deals with players and transport.
 
+use std::collections::VecDeque;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::SystemTime;
 
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
+use bevy_replicon::shared::backend::connected_client::NetworkId;
 use bevy_replicon_renet::{
     RenetChannelsExt, RenetServer, RepliconRenetPlugins,
     netcode::{NetcodeServerTransport, ServerAuthentication, ServerConfig},
@@ -16,17 +18,44 @@ use bevy_replicon_renet::{
 };
 
 use super::{
-    MatchInfo, NetPos, Owner, PlayerInput, ShootRequest, StartMatch, YouAreOwner, is_server,
-    protocol_id_for, register_protocol,
+    ControllingClient, LastProcessedInput, MatchInfo, NetPos, Owner, PlayerInput, ShootRequest,
+    StartMatch, YouAreOwner, is_server, protocol_id_for, register_protocol,
 };
 use crate::game::combat::{Dead, DoubleShot, QuadShot, Zigzag};
 use crate::game::map::{self, CurrentMap};
-use crate::game::player::{Player, PlayerColor, PlayerIntent};
+use crate::game::player::{Player, PlayerColor, PlayerIntent, apply_player_intent};
 use crate::game::projectile::{Facing, FireCooldown, ShotMods, try_fire};
 use crate::game::state::{GameState, MatchConfig};
 
 /// Maximum simultaneous players.
 const MAX_CLIENTS: usize = 64;
+
+/// Most inputs buffered per player before the oldest is dropped. Bounds how far
+/// behind real time a flooding/lagging client can push the server.
+const INPUT_QUEUE_CAP: usize = 8;
+
+/// Server-only per-player buffer of inputs awaiting their fixed tick. One input
+/// is dequeued and applied per tick (see [`dequeue_inputs`]) so the count of
+/// applied inputs matches the client's one-replay-per-input reconciliation.
+#[derive(Component, Default)]
+struct InputQueue {
+    pending: VecDeque<(u32, Vec2)>,
+    /// Highest seq accepted so far; drops duplicates/out-of-order resends.
+    last_enqueued: u32,
+}
+
+impl InputQueue {
+    fn push(&mut self, seq: u32, dir: Vec2) {
+        if seq <= self.last_enqueued {
+            return; // duplicate or stale (unreliable channel can reorder)
+        }
+        self.last_enqueued = seq;
+        if self.pending.len() >= INPUT_QUEUE_CAP {
+            self.pending.pop_front();
+        }
+        self.pending.push_back((seq, dir));
+    }
+}
 
 /// The address the server binds its UDP socket to.
 #[derive(Resource, Clone, Copy)]
@@ -56,6 +85,14 @@ impl Plugin for ServerNetPlugin {
             .add_systems(
                 OnEnter(GameState::Playing),
                 position_players.run_if(is_server),
+            )
+            // Apply one buffered input per fixed tick, before movement consumes it.
+            .add_systems(
+                FixedUpdate,
+                dequeue_inputs
+                    .run_if(in_state(GameState::Playing))
+                    .run_if(is_server)
+                    .before(apply_player_intent),
             )
             // A client is `AuthorizedClient` once its protocol hash matches ours.
             .add_observer(on_client_authorized)
@@ -109,15 +146,22 @@ fn on_client_authorized(
     add: On<Add, AuthorizedClient>,
     mut commands: Commands,
     players: Query<(), With<Player>>,
+    network_ids: Query<&NetworkId>,
 ) {
     let index = players.iter().count();
     let color = PlayerColor::nth(index);
+    // The renet backend put `NetworkId` on this same (client) entity on connect.
+    // The controlling client matches it against its own id to find this player.
+    let client_id = network_ids.get(add.entity).map(NetworkId::get).unwrap_or(0);
 
     commands.entity(add.entity).insert((
         Player,
         color,
         NetPos(Vec2::ZERO),
         PlayerIntent::default(),
+        ControllingClient(client_id),
+        LastProcessedInput(0),
+        InputQueue::default(),
         Replicated,
     ));
 
@@ -187,12 +231,29 @@ fn on_start_match(
     );
 }
 
-/// Applies movement input to the sending client's player.
-fn receive_input(input: On<FromClient<PlayerInput>>, mut players: Query<&mut PlayerIntent>) {
+/// Buffers a movement input on the sending client's player. The input is applied
+/// later, one per fixed tick, by [`dequeue_inputs`] — not immediately — so the
+/// server consumes exactly one input per tick to match client reconciliation.
+fn receive_input(input: On<FromClient<PlayerInput>>, mut players: Query<&mut InputQueue>) {
     if let Some(entity) = input.client_id.entity()
-        && let Ok(mut intent) = players.get_mut(entity)
+        && let Ok(mut queue) = players.get_mut(entity)
     {
-        intent.0 = input.dir;
+        queue.push(input.seq, input.dir);
+    }
+}
+
+/// Each fixed tick, applies the next buffered input per player: sets the movement
+/// intent and records the applied seq in the replicated [`LastProcessedInput`]
+/// (the ack the client reconciles against). On an empty queue the player coasts
+/// (keeps the last intent) and the ack is left unchanged.
+fn dequeue_inputs(
+    mut players: Query<(&mut InputQueue, &mut PlayerIntent, &mut LastProcessedInput)>,
+) {
+    for (mut queue, mut intent, mut ack) in &mut players {
+        if let Some((seq, dir)) = queue.pending.pop_front() {
+            intent.0 = dir;
+            ack.0 = seq;
+        }
     }
 }
 

@@ -27,7 +27,8 @@ use bevy_replicon_renet::{
 
 use super_battle_royale::game::bot::Bot;
 use super_battle_royale::game::net::{
-    NetPos, PlayerInput, ShootRequest, protocol_id_for, register_protocol,
+    ControllingClient, LastProcessedInput, NetPos, PlayerInput, ShootRequest, protocol_id_for,
+    register_protocol,
 };
 use super_battle_royale::game::pickup::PickupKind;
 use super_battle_royale::game::player::{Player, PlayerColor};
@@ -64,8 +65,13 @@ fn replicates_world_and_receives_input() {
     // Client side: stream a fixed input once connected.
     client_app.add_systems(
         Update,
-        (|mut commands: Commands| commands.client_trigger(PlayerInput { dir: TEST_INPUT }))
-            .run_if(in_state(ClientState::Connected)),
+        (|mut commands: Commands| {
+            commands.client_trigger(PlayerInput {
+                dir: TEST_INPUT,
+                seq: 1,
+            })
+        })
+        .run_if(in_state(ClientState::Connected)),
     );
 
     // Connect over loopback UDP and let both sides settle.
@@ -407,6 +413,50 @@ fn projectile_damages_and_kills_bot() {
         app.world().get::<Health>(bot).unwrap().current,
         100.0,
         "bot should respawn with full health"
+    );
+}
+
+/// The prediction plumbing — the per-player `ControllingClient` (owner id, used
+/// to find "my" entity) and `LastProcessedInput` (the input ack the client
+/// reconciles against) — must replicate to clients. Without this, prediction has
+/// nothing to anchor to.
+#[test]
+fn replicates_prediction_components() {
+    const OWNER_ID: u64 = 0xABCD_1234;
+    const ACK_SEQ: u32 = 42;
+
+    let mut server_app = build_app();
+    let mut client_app = build_app();
+
+    server_app.world_mut().spawn((
+        Player,
+        NetPos(PLAYER_POS),
+        ControllingClient(OWNER_ID),
+        LastProcessedInput(ACK_SEQ),
+        Replicated,
+    ));
+
+    let port = setup_server(&mut server_app);
+    setup_client(&mut client_app, port);
+    wait_for_connection(&mut server_app, &mut client_app);
+    for _ in 0..100 {
+        client_app.update();
+        server_app.update();
+    }
+
+    let mut players = client_app
+        .world_mut()
+        .query_filtered::<(&ControllingClient, &LastProcessedInput), With<Player>>();
+    let (owner, ack) = players
+        .single(client_app.world())
+        .expect("client should see exactly one player");
+    assert_eq!(
+        owner.0, OWNER_ID,
+        "owner id should replicate (for local-player id)"
+    );
+    assert_eq!(
+        ack.0, ACK_SEQ,
+        "input ack should replicate (for reconciliation)"
     );
 }
 
