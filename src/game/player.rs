@@ -204,48 +204,87 @@ pub(crate) fn apply_player_intent(
     }
 }
 
-/// Builds a normalized movement vector from the WASD / arrow keys.
+/// Left-stick magnitude below which the analog stick reads as neutral. Bevy
+/// already applies a per-axis deadzone via `GamepadSettings`; this is a small
+/// extra radial guard so a resting stick never nudges the player.
 #[cfg(feature = "client")]
-pub(crate) fn input_direction(input: &ButtonInput<KeyCode>) -> Vec2 {
+const STICK_DEADZONE: f32 = 0.1;
+
+/// Builds a movement vector from the WASD / arrow keys plus the first gamepad's
+/// left stick and D-pad (if one is connected). Keyboard and pad are additive, so
+/// either — or both at once — drives the player. The result is clamped to unit
+/// length (so a client can't request more than full speed); analog magnitude
+/// below 1.0 is preserved for fine control, and `step_player` re-clamps anyway.
+#[cfg(feature = "client")]
+pub(crate) fn input_direction(keys: &ButtonInput<KeyCode>, pad: Option<&Gamepad>) -> Vec2 {
     let mut direction = Vec2::ZERO;
-    if input.pressed(KeyCode::KeyW) || input.pressed(KeyCode::ArrowUp) {
+    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
         direction.y += 1.0;
     }
-    if input.pressed(KeyCode::KeyS) || input.pressed(KeyCode::ArrowDown) {
+    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
         direction.y -= 1.0;
     }
-    if input.pressed(KeyCode::KeyA) || input.pressed(KeyCode::ArrowLeft) {
+    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
         direction.x -= 1.0;
     }
-    if input.pressed(KeyCode::KeyD) || input.pressed(KeyCode::ArrowRight) {
+    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
         direction.x += 1.0;
     }
-    if direction != Vec2::ZERO {
-        direction.normalize()
-    } else {
-        direction
+    if let Some(pad) = pad {
+        // `left_stick().y` is already +up, matching world space.
+        let stick = pad.left_stick();
+        if stick.length() > STICK_DEADZONE {
+            direction += stick;
+        }
+        direction += pad.dpad();
     }
+    direction.clamp_length_max(1.0)
 }
 
-/// Offline: feed local keyboard input into the (single) player's intent.
+/// True if the player is firing this frame: keyboard Space, or the first
+/// gamepad's Cross/A (`South`) or right trigger (`R2`). The single place the
+/// shoot binding is defined, shared by the offline and online fire paths.
+#[cfg(feature = "client")]
+pub(crate) fn shoot_just_pressed(keys: &ButtonInput<KeyCode>, pad: Option<&Gamepad>) -> bool {
+    keys.just_pressed(KeyCode::Space)
+        || pad.is_some_and(|p| {
+            p.just_pressed(GamepadButton::South) || p.just_pressed(GamepadButton::RightTrigger2)
+        })
+}
+
+/// True while the player is holding shield: keyboard Shift, or the first
+/// gamepad's left trigger (`L2`) or Square/X (`West`). Shared by the offline and
+/// online shield paths.
+#[cfg(feature = "client")]
+pub(crate) fn shield_pressed(keys: &ButtonInput<KeyCode>, pad: Option<&Gamepad>) -> bool {
+    keys.pressed(KeyCode::ShiftLeft)
+        || keys.pressed(KeyCode::ShiftRight)
+        || pad.is_some_and(|p| {
+            p.pressed(GamepadButton::LeftTrigger2) || p.pressed(GamepadButton::West)
+        })
+}
+
+/// Offline: feed local keyboard/gamepad input into the (single) player's intent.
 #[cfg(feature = "client")]
 fn read_local_input(
     input: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
     mut query: Query<&mut PlayerIntent, With<Player>>,
 ) {
-    let dir = input_direction(&input);
+    let dir = input_direction(&input, gamepads.iter().next());
     for mut intent in &mut query {
         intent.0 = dir;
     }
 }
 
-/// Offline: set the local player's shield request from Left/Right Shift.
+/// Offline: set the local player's shield request from Shift / L2 / Square.
 #[cfg(feature = "client")]
 fn read_local_shield(
     input: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
     mut query: Query<&mut ShieldState, With<Player>>,
 ) {
-    let pressed = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
+    let pressed = shield_pressed(&input, gamepads.iter().next());
     for mut shield in &mut query {
         shield.requested = pressed;
     }
@@ -385,6 +424,29 @@ mod tests {
             "x should be blocked by the wall"
         );
         assert!(next.y > 1.0, "y should slide past the wall, got {next:?}");
+    }
+
+    /// Keyboard-only path of the gamepad-aware `input_direction` (pad = None):
+    /// a single key gives a unit axis, two keys give a unit diagonal.
+    #[cfg(feature = "client")]
+    #[test]
+    fn input_direction_keyboard_only() {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::KeyW);
+        let up = input_direction(&keys, None);
+        assert!((up - Vec2::Y).length() < 1e-3, "W should be +Y, got {up:?}");
+
+        keys.press(KeyCode::KeyD);
+        let diag = input_direction(&keys, None);
+        assert!(
+            (diag.length() - 1.0).abs() < 1e-3,
+            "W+D should be a unit diagonal, got {diag:?}"
+        );
+        assert!(diag.x > 0.0 && diag.y > 0.0);
+
+        keys.release(KeyCode::KeyW);
+        keys.release(KeyCode::KeyD);
+        assert_eq!(input_direction(&keys, None), Vec2::ZERO);
     }
 
     #[test]

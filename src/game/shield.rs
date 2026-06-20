@@ -15,10 +15,10 @@ use bevy::asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use super::combat::Dead;
-use super::net::{NetPos, is_authoritative};
-use super::player::PLAYER_SIZE;
 #[cfg(feature = "client")]
 use super::combat::SpawnInvulnerability;
+use super::net::{NetPos, is_authoritative};
+use super::player::PLAYER_SIZE;
 #[cfg(feature = "client")]
 use super::player::{Player, PlayerColor};
 use super::projectile::{PROJECTILE_RADIUS, ProjectileOwner, ProjectileVelocity};

@@ -19,15 +19,21 @@ use super::state::{GameState, MatchConfig};
 /// Largest bot count the owner can dial up to in the lobby.
 const MAX_BOTS: u8 = 16;
 
+/// Resting background for a lobby button.
+const BUTTON_BG: Color = Color::srgb(0.2, 0.2, 0.32);
+/// Background for the button row the controller currently has focused.
+const BUTTON_BG_FOCUSED: Color = Color::srgb(0.35, 0.35, 0.55);
+
 pub struct LobbyPlugin;
 
 impl Plugin for LobbyPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<IsOwner>()
             .init_resource::<LobbyDraft>()
+            .init_resource::<LobbyFocus>()
             .add_systems(
                 OnEnter(GameState::Lobby),
-                (spawn_lobby_camera, spawn_lobby_ui),
+                (spawn_lobby_camera, spawn_lobby_ui, reset_lobby_focus),
             )
             .add_systems(
                 OnEnter(GameState::Lobby),
@@ -36,7 +42,13 @@ impl Plugin for LobbyPlugin {
             .add_systems(OnExit(GameState::Lobby), despawn_lobby)
             .add_systems(
                 Update,
-                (handle_buttons, update_labels, update_visibility)
+                (
+                    handle_buttons,
+                    handle_lobby_gamepad,
+                    update_focus_highlight,
+                    update_labels,
+                    update_visibility,
+                )
                     .run_if(in_state(GameState::Lobby)),
             )
             // The owner client learns it's the owner (no-op in other modes).
@@ -81,6 +93,27 @@ enum LobbyButton {
     BotPlus,
     Start,
 }
+
+impl LobbyButton {
+    /// Which focus row this button lives on (0 = Map, 1 = Bots, 2 = Start).
+    /// Controller navigation moves between rows; left/right adjusts within one.
+    fn row(self) -> u8 {
+        match self {
+            LobbyButton::MapPrev | LobbyButton::MapNext => 0,
+            LobbyButton::BotMinus | LobbyButton::BotPlus => 1,
+            LobbyButton::Start => 2,
+        }
+    }
+}
+
+/// The config row the controller currently has focused (0 = Map, 1 = Bots,
+/// 2 = Start). Reset to the top row each time the lobby opens. Only meaningful
+/// for the owner; non-owners have no config controls.
+#[derive(Resource, Default)]
+struct LobbyFocus(u8);
+
+/// Highest focus row index (Start). Navigation clamps to `0..=LAST_FOCUS_ROW`.
+const LAST_FOCUS_ROW: u8 = 2;
 
 /// Text node showing the selected map's name.
 #[derive(Component)]
@@ -246,7 +279,7 @@ fn spawn_button(parent: &mut ChildSpawnerCommands, kind: LobbyButton, label: &st
                 align_items: AlignItems::Center,
                 ..default()
             },
-            BackgroundColor(Color::srgb(0.2, 0.2, 0.32)),
+            BackgroundColor(BUTTON_BG),
         ))
         .with_children(|button| {
             button.spawn((
@@ -266,8 +299,70 @@ fn despawn_lobby(mut commands: Commands, query: Query<Entity, With<LobbyUi>>) {
     }
 }
 
-/// Applies button clicks: cycles the map, adjusts the bot count, or starts the
-/// match. Starting is gated on ownership here (the server validates it too).
+/// Performs one lobby action: cycle the map, adjust the bot count, or start the
+/// match. Shared by the mouse path ([`handle_buttons`]) and the controller path
+/// ([`handle_lobby_gamepad`]) so the start logic lives in one place. Starting is
+/// gated on ownership here (the server validates it too).
+#[allow(clippy::too_many_arguments)]
+fn apply_lobby_action(
+    button: LobbyButton,
+    draft: &mut LobbyDraft,
+    is_owner: &IsOwner,
+    role: &NetRole,
+    commands: &mut Commands,
+    config: &mut MatchConfig,
+    next: &mut NextState<GameState>,
+) {
+    let map_count = MAPS.len() as u8;
+    match button {
+        LobbyButton::MapPrev => {
+            draft.map_index = (draft.map_index + map_count - 1) % map_count;
+        }
+        LobbyButton::MapNext => {
+            draft.map_index = (draft.map_index + 1) % map_count;
+        }
+        LobbyButton::BotMinus => {
+            draft.bot_count = draft.bot_count.saturating_sub(1);
+        }
+        LobbyButton::BotPlus => {
+            draft.bot_count = (draft.bot_count + 1).min(MAX_BOTS);
+        }
+        LobbyButton::Start => {
+            if !is_owner.0 {
+                return;
+            }
+            match *role {
+                NetRole::Offline => {
+                    // Apply the config and start locally. Insert the map
+                    // resources *before* the state change: the OnEnter(Playing)
+                    // spawn systems read them.
+                    config.map_index = draft.map_index;
+                    config.bot_count = draft.bot_count;
+                    map::insert_map_resources(commands, draft.map_index);
+                    // The match-state singleton (local, not replicated offline)
+                    // that `match_flow` drives and the winner banner reads.
+                    commands.spawn(MatchInfo {
+                        map_index: draft.map_index,
+                        round: 0,
+                        phase: MatchPhase::Playing,
+                        winner: Winner::Draw,
+                    });
+                    next.set(GameState::Playing);
+                }
+                NetRole::OnlineClient => {
+                    // Ask the server to start; we transition when MatchInfo arrives.
+                    commands.client_trigger(StartMatch {
+                        map_index: draft.map_index,
+                        bot_count: draft.bot_count,
+                    });
+                }
+                NetRole::Server => {}
+            }
+        }
+    }
+}
+
+/// Applies mouse button clicks via [`apply_lobby_action`].
 fn handle_buttons(
     interactions: Query<(&Interaction, &LobbyButton), Changed<Interaction>>,
     mut draft: ResMut<LobbyDraft>,
@@ -277,58 +372,131 @@ fn handle_buttons(
     mut config: ResMut<MatchConfig>,
     mut next: ResMut<NextState<GameState>>,
 ) {
-    let map_count = MAPS.len() as u8;
     for (interaction, button) in &interactions {
         if *interaction != Interaction::Pressed {
             continue;
         }
-        match button {
-            LobbyButton::MapPrev => {
-                draft.map_index = (draft.map_index + map_count - 1) % map_count;
-            }
-            LobbyButton::MapNext => {
-                draft.map_index = (draft.map_index + 1) % map_count;
-            }
-            LobbyButton::BotMinus => {
-                draft.bot_count = draft.bot_count.saturating_sub(1);
-            }
-            LobbyButton::BotPlus => {
-                draft.bot_count = (draft.bot_count + 1).min(MAX_BOTS);
-            }
-            LobbyButton::Start => {
-                if !is_owner.0 {
-                    continue;
-                }
-                match *role {
-                    NetRole::Offline => {
-                        // Apply the config and start locally. Insert the map
-                        // resources *before* the state change: the OnEnter(Playing)
-                        // spawn systems read them.
-                        config.map_index = draft.map_index;
-                        config.bot_count = draft.bot_count;
-                        map::insert_map_resources(&mut commands, draft.map_index);
-                        // The match-state singleton (local, not replicated offline)
-                        // that `match_flow` drives and the winner banner reads.
-                        commands.spawn(MatchInfo {
-                            map_index: draft.map_index,
-                            round: 0,
-                            phase: MatchPhase::Playing,
-                            winner: Winner::Draw,
-                        });
-                        next.set(GameState::Playing);
-                    }
-                    NetRole::OnlineClient => {
-                        // Ask the server to start; we transition when MatchInfo arrives.
-                        commands.client_trigger(StartMatch {
-                            map_index: draft.map_index,
-                            bot_count: draft.bot_count,
-                        });
-                    }
-                    NetRole::Server => {}
-                }
-            }
+        apply_lobby_action(
+            *button,
+            &mut draft,
+            &is_owner,
+            &role,
+            &mut commands,
+            &mut config,
+            &mut next,
+        );
+    }
+}
+
+/// Quantizes a stick axis into -1 / 0 / +1, so an analog flick produces a single
+/// discrete nav step (edge-detected against the previous frame's zone).
+fn axis_zone(v: f32) -> i32 {
+    const NAV_THRESHOLD: f32 = 0.5;
+    if v > NAV_THRESHOLD {
+        1
+    } else if v < -NAV_THRESHOLD {
+        -1
+    } else {
+        0
+    }
+}
+
+/// Owner-only controller navigation of the config panel. D-pad / left-stick move
+/// focus between rows (up/down) and adjust the focused control (left/right);
+/// Cross/A confirms the focused row and the `Start` button starts from anywhere.
+/// Feeds the same [`apply_lobby_action`] as the mouse path.
+#[allow(clippy::too_many_arguments)]
+fn handle_lobby_gamepad(
+    gamepads: Query<&Gamepad>,
+    mut focus: ResMut<LobbyFocus>,
+    mut prev_zone: Local<IVec2>,
+    mut draft: ResMut<LobbyDraft>,
+    is_owner: Res<IsOwner>,
+    role: Res<NetRole>,
+    mut commands: Commands,
+    mut config: ResMut<MatchConfig>,
+    mut next: ResMut<NextState<GameState>>,
+) {
+    // Only the owner has a navigable config panel.
+    if !is_owner.0 {
+        return;
+    }
+    let Some(pad) = gamepads.iter().next() else {
+        return;
+    };
+
+    // Discrete nav signals: D-pad just-presses, plus one event per left-stick
+    // flick (the stick zone newly entering a non-zero value this frame).
+    let stick = pad.left_stick();
+    let zone = IVec2::new(axis_zone(stick.x), axis_zone(stick.y));
+    let prev = *prev_zone;
+    *prev_zone = zone;
+
+    let up = pad.just_pressed(GamepadButton::DPadUp) || (zone.y == 1 && prev.y != 1);
+    let down = pad.just_pressed(GamepadButton::DPadDown) || (zone.y == -1 && prev.y != -1);
+    let left = pad.just_pressed(GamepadButton::DPadLeft) || (zone.x == -1 && prev.x != -1);
+    let right = pad.just_pressed(GamepadButton::DPadRight) || (zone.x == 1 && prev.x != 1);
+
+    // Move focus between rows.
+    if up {
+        focus.0 = focus.0.saturating_sub(1);
+    }
+    if down {
+        focus.0 = (focus.0 + 1).min(LAST_FOCUS_ROW);
+    }
+
+    // Left/right adjusts the focused control (no horizontal action on Start).
+    // Cross/A confirms the Start row; the controller's Start button starts from
+    // any row (a quick-start for the owner).
+    let action = match (focus.0, left, right) {
+        (0, true, _) => Some(LobbyButton::MapPrev),
+        (0, _, true) => Some(LobbyButton::MapNext),
+        (1, true, _) => Some(LobbyButton::BotMinus),
+        (1, _, true) => Some(LobbyButton::BotPlus),
+        _ if pad.just_pressed(GamepadButton::South) && focus.0 == LAST_FOCUS_ROW => {
+            Some(LobbyButton::Start)
+        }
+        _ => None,
+    };
+    let action = action.or_else(|| {
+        pad.just_pressed(GamepadButton::Start)
+            .then_some(LobbyButton::Start)
+    });
+
+    if let Some(button) = action {
+        apply_lobby_action(
+            button,
+            &mut draft,
+            &is_owner,
+            &role,
+            &mut commands,
+            &mut config,
+            &mut next,
+        );
+    }
+}
+
+/// Tints the focused row's buttons brighter so the controller user sees the
+/// current selection. Independent of mouse interaction (there is no hover tint).
+fn update_focus_highlight(
+    focus: Res<LobbyFocus>,
+    mut buttons: Query<(&LobbyButton, &mut BackgroundColor)>,
+) {
+    for (button, mut background) in &mut buttons {
+        let color = if button.row() == focus.0 {
+            BUTTON_BG_FOCUSED
+        } else {
+            BUTTON_BG
+        };
+        if background.0 != color {
+            background.0 = color;
         }
     }
+}
+
+/// Resets controller focus to the top row whenever the lobby opens.
+fn reset_lobby_focus(mut focus: ResMut<LobbyFocus>) {
+    focus.0 = 0;
 }
 
 /// Keeps the map-name and bot-count labels in sync with the draft selection.

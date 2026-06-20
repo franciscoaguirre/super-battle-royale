@@ -22,6 +22,7 @@ default = ["client"]
 # `dynamic_linking` feature keeps iterative builds fast (drop it for release).
 client = [
     "bevy/2d",
+    "bevy/bevy_gilrs",
     "bevy/default_font",
     "bevy/dynamic_linking",
     "bevy/mp3",
