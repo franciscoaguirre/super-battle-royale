@@ -1,13 +1,16 @@
-//! Shooting: straight-flying projectiles.
+//! Shooting: flat, long-range projectiles.
 //!
 //! Press Space to fire a shot in the player's last-moved direction. The shot
-//! travels at a constant horizontal speed and altitude. PvP damage, shield
-//! blocks, and parries live in `combat.rs`.
+//! flies perfectly flat at a constant speed and despawns once it has travelled a
+//! long fixed distance ([`MAX_RANGE`]), hits a wall, leaves the arena, or
+//! collides with an **enemy** shot (shots block each other — see
+//! [`collide_projectiles`]). PvP damage, shield blocks, and parries live in
+//! `combat.rs`.
 //!
-//! Like every dynamic entity, a projectile's ground position lives in [`NetPos`]
-//! and replicates; its altitude replicates via [`Height`] so clients can draw it
-//! above the floor; its velocity is server/sim-only. Firing and motion run on the
-//! authoritative side (offline + server); rendering runs on the client.
+//! Like every dynamic entity, a projectile's position lives in [`NetPos`] and
+//! replicates; its velocity and travelled distance are server/sim-only. Firing
+//! and motion run on the authoritative side (offline + server); rendering runs on
+//! the client.
 
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
@@ -27,11 +30,9 @@ use super::net::is_offline;
 
 /// Constant horizontal speed of a shot, in world units per second.
 const PROJECTILE_SPEED: f32 = 360.0;
-/// Altitude a shot starts at and maintains. Kept low so the shot leaves around
-/// the player's body rather than above their head.
-const INITIAL_HEIGHT: f32 = 12.0;
-/// Gravity applied to a shot's vertical velocity each frame (world units/s²).
-const GRAVITY: f32 = 120.0;
+/// How far a shot travels before it fizzles out. Set effectively full-map so a
+/// shot almost always ends on a wall, the arena edge, or another shot first.
+const MAX_RANGE: f32 = 2200.0;
 /// Minimum seconds between shots from one player.
 const FIRE_COOLDOWN: f32 = 0.35;
 /// How much faster the fire-rate cooldown ticks while a player holds [`RapidFire`].
@@ -50,9 +51,6 @@ const IMPACT_LIFETIME: f32 = 0.3;
 /// Side length of the (square) projectile sprite. Client-only (rendering).
 #[cfg(feature = "client")]
 const PROJECTILE_SIZE: f32 = PROJECTILE_RADIUS * 2.0;
-
-#[cfg(feature = "client")]
-const SHADOW_COLOR: Color = Color::srgba(0.0, 0.0, 0.0, 0.35);
 
 // Glowing motion trail: each frame drops a fading segment behind the shot.
 #[cfg(feature = "client")]
@@ -74,22 +72,21 @@ const SFX_VOLUME: f32 = 0.6;
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
 pub struct Projectile;
 
-/// Replicated altitude of a shot above the ground. The renderer offsets the
-/// sprite upward by this; simulation lowers it under gravity until it crashes.
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
-pub struct Height(pub f32);
-
 /// The firing player's color, replicated so the shot and its trail glow to match.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
 pub struct ShotColor(pub PlayerColor);
 
 /// Server/sim-only velocity of a shot. Not replicated (clients only need the
-/// resulting [`NetPos`]/[`Height`]).
+/// resulting [`NetPos`]).
 #[derive(Component, Clone, Copy, Debug)]
 pub struct ProjectileVelocity {
     pub horizontal: Vec2,
-    pub vertical: f32,
 }
+
+/// Server/sim-only running total of how far a shot has flown. Despawns the shot
+/// once it reaches [`MAX_RANGE`].
+#[derive(Component, Clone, Copy, Debug)]
+pub struct DistanceTraveled(pub f32);
 
 /// The player who fired a shot, so it never damages its owner. Server/sim-only.
 #[derive(Component, Clone, Copy, Debug)]
@@ -151,11 +148,6 @@ impl ShotMods {
     }
 }
 
-/// Client-only marker for the ground shadow drawn beneath a shot.
-#[cfg(feature = "client")]
-#[derive(Component)]
-pub struct ProjectileShadow;
-
 /// Client-only fading segment of a shot's glowing trail. Holds its own lifetime
 /// and the (full-brightness) glow color to fade from.
 #[cfg(feature = "client")]
@@ -204,6 +196,7 @@ impl Plugin for ProjectilePlugin {
                 update_facing,
                 tick_cooldowns,
                 simulate_projectiles,
+                collide_projectiles.after(simulate_projectiles),
                 tick_impacts,
             )
                 .run_if(in_state(GameState::Playing))
@@ -288,8 +281,8 @@ pub(crate) fn tick_cooldowns(
     }
 }
 
-/// Moves shots forward, sinks them under gravity, and despawns them when they
-/// crash into the ground or leave the arena.
+/// Moves shots forward in a straight line and despawns them when they hit a wall,
+/// leave the arena, or run out of range.
 #[allow(clippy::type_complexity)]
 fn simulate_projectiles(
     time: Res<Time>,
@@ -300,15 +293,15 @@ fn simulate_projectiles(
         (
             Entity,
             &mut NetPos,
-            &mut Height,
-            &mut ProjectileVelocity,
+            &mut DistanceTraveled,
+            &ProjectileVelocity,
             Option<&mut ZigzagMotion>,
         ),
         With<Projectile>,
     >,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut pos, mut height, mut velocity, zigzag) in &mut query {
+    for (entity, mut pos, mut traveled, velocity, zigzag) in &mut query {
         // A zig-zagging shot rotates its (constant) base velocity by an
         // oscillating angle each frame; rotating a fresh copy avoids drift.
         let horizontal = match zigzag {
@@ -319,21 +312,52 @@ fn simulate_projectiles(
             }
             None => velocity.horizontal,
         };
-        pos.0 += horizontal * dt;
-        velocity.vertical -= GRAVITY * dt;
-        height.0 += velocity.vertical * dt;
+        let step = horizontal * dt;
+        pos.0 += step;
+        traveled.0 += step.length();
 
         let p = pos.0;
         let out_of_bounds =
             p.x < bounds.min.x || p.x > bounds.max.x || p.y < bounds.min.y || p.y > bounds.max.y;
         let hit_wall = map.0.circle_intersects_wall(p, PROJECTILE_RADIUS);
-        let hit_ground = height.0 <= 0.0;
-        if hit_wall || hit_ground {
+        if hit_wall {
             spawn_impact(&mut commands, ImpactKind::Ground, pos.0);
             commands.entity(entity).despawn();
-        } else if out_of_bounds {
+        } else if out_of_bounds || traveled.0 >= MAX_RANGE {
+            // Out of bounds or spent: just fizzle out, no impact cue.
             commands.entity(entity).despawn();
         }
+    }
+}
+
+/// Shots block each other: when two shots from **different** owners overlap, both
+/// are destroyed (and a clash impact pops). Same-owner shots pass through, so a
+/// player's own multi-shot/quad burst never cancels itself at the spawn point.
+fn collide_projectiles(
+    mut commands: Commands,
+    projectiles: Query<(Entity, &NetPos, &ProjectileOwner), With<Projectile>>,
+) {
+    const CLASH_DIST: f32 = 2.0 * PROJECTILE_RADIUS;
+    let shots: Vec<(Entity, Vec2, Entity)> = projectiles
+        .iter()
+        .map(|(entity, pos, owner)| (entity, pos.0, owner.0))
+        .collect();
+
+    let mut destroyed = std::collections::HashSet::new();
+    for i in 0..shots.len() {
+        for j in (i + 1)..shots.len() {
+            let (e_a, pos_a, owner_a) = shots[i];
+            let (e_b, pos_b, owner_b) = shots[j];
+            if owner_a == owner_b || pos_a.distance(pos_b) > CLASH_DIST {
+                continue;
+            }
+            destroyed.insert(e_a);
+            destroyed.insert(e_b);
+            spawn_impact(&mut commands, ImpactKind::Object, pos_a.midpoint(pos_b));
+        }
+    }
+    for entity in destroyed {
+        commands.entity(entity).despawn();
     }
 }
 
@@ -412,10 +436,9 @@ fn spawn_projectile(
         ProjectileOwner(owner),
         ShotColor(color),
         NetPos(origin),
-        Height(INITIAL_HEIGHT),
+        DistanceTraveled(0.0),
         ProjectileVelocity {
             horizontal: dir * PROJECTILE_SPEED,
-            vertical: 0.0,
         },
         Replicated,
         // Authoritative-side tag so leftover in-flight shots are cleared on a map
@@ -485,62 +508,37 @@ pub(crate) fn shot_glow(color: PlayerColor) -> Color {
     }
 }
 
-/// Gives a freshly spawned/replicated shot its sprite plus a ground shadow.
-/// The shadow is a child, so it despawns recursively with the projectile.
+/// Gives a freshly spawned/replicated shot its sprite.
 #[cfg(feature = "client")]
 #[allow(clippy::type_complexity)]
 fn attach_projectile_sprite(
     mut commands: Commands,
-    query: Query<(Entity, &NetPos, &Height, &ShotColor), (With<Projectile>, Without<Sprite>)>,
+    query: Query<(Entity, &NetPos, &ShotColor), (With<Projectile>, Without<Sprite>)>,
 ) {
-    for (entity, pos, height, color) in &query {
-        commands
-            .entity(entity)
-            .insert((
-                Sprite {
-                    color: shot_glow(color.0),
-                    custom_size: Some(Vec2::splat(PROJECTILE_SIZE)),
-                    ..default()
-                },
-                Transform::from_xyz(pos.0.x, pos.0.y + height.0, 20.0),
-            ))
-            .with_children(|parent| {
-                // Local offset cancels the parent's altitude so the shadow stays
-                // pinned to the ground; z lands it just under players (world z 9).
-                parent.spawn((
-                    ProjectileShadow,
-                    Sprite {
-                        color: SHADOW_COLOR,
-                        custom_size: Some(Vec2::new(PROJECTILE_SIZE, PROJECTILE_SIZE * 0.5)),
-                        ..default()
-                    },
-                    Transform::from_xyz(0.0, -height.0, -11.0),
-                ));
-            });
+    for (entity, pos, color) in &query {
+        commands.entity(entity).insert((
+            Sprite {
+                color: shot_glow(color.0),
+                custom_size: Some(Vec2::splat(PROJECTILE_SIZE)),
+                ..default()
+            },
+            Transform::from_xyz(pos.0.x, pos.0.y, 20.0),
+        ));
     }
 }
 
-/// Positions each shot at `(NetPos.x, NetPos.y + Height)` and keeps its shadow on
-/// the ground. Runs instead of `sync_netpos_to_transform` for projectiles.
+/// Positions each shot at its `NetPos`. Runs instead of
+/// `sync_netpos_to_transform` for projectiles (which it excludes), so they snap
+/// to the confirmed position rather than interpolating.
 #[cfg(feature = "client")]
 fn render_projectiles(
-    projectiles: Query<(Entity, &NetPos, &Height, Option<&Children>), With<Projectile>>,
+    projectiles: Query<(Entity, &NetPos), With<Projectile>>,
     mut transforms: Query<&mut Transform>,
-    shadows: Query<(), With<ProjectileShadow>>,
 ) {
-    for (entity, pos, height, children) in &projectiles {
+    for (entity, pos) in &projectiles {
         if let Ok(mut transform) = transforms.get_mut(entity) {
             transform.translation.x = pos.0.x;
-            transform.translation.y = pos.0.y + height.0;
-        }
-        if let Some(children) = children {
-            for &child in children {
-                if shadows.contains(child)
-                    && let Ok(mut shadow) = transforms.get_mut(child)
-                {
-                    shadow.translation.y = -height.0;
-                }
-            }
+            transform.translation.y = pos.0.y;
         }
     }
 }
@@ -595,9 +593,9 @@ fn play_impact_sounds(
 #[cfg(feature = "client")]
 fn spawn_projectile_trail(
     mut commands: Commands,
-    projectiles: Query<(&NetPos, &Height, &ShotColor), With<Projectile>>,
+    projectiles: Query<(&NetPos, &ShotColor), With<Projectile>>,
 ) {
-    for (pos, height, color) in &projectiles {
+    for (pos, color) in &projectiles {
         let glow = shot_glow(color.0);
         commands.spawn((
             TrailSegment {
@@ -609,8 +607,8 @@ fn spawn_projectile_trail(
                 custom_size: Some(Vec2::splat(TRAIL_SIZE)),
                 ..default()
             },
-            // Just behind the shot (z 19) but still above players/shadow.
-            Transform::from_xyz(pos.0.x, pos.0.y + height.0, 19.0),
+            // Just behind the shot (z 19) but still above players.
+            Transform::from_xyz(pos.0.x, pos.0.y, 19.0),
             super::InGame,
         ));
     }
@@ -710,10 +708,9 @@ mod tests {
             .spawn((
                 Projectile,
                 NetPos(Vec2::ZERO),
-                Height(1000.0), // high up, so gravity won't crash it during the test
+                DistanceTraveled(0.0),
                 ProjectileVelocity {
                     horizontal: Vec2::new(PROJECTILE_SPEED, 0.0),
-                    vertical: 0.0,
                 },
                 ZigzagMotion { elapsed: 0.0 },
             ))
@@ -736,6 +733,46 @@ mod tests {
             pos.x > 0.0,
             "a zig-zag shot should still travel forward (got x={})",
             pos.x
+        );
+    }
+
+    #[test]
+    fn enemy_shots_block_each_other_but_friendly_shots_pass() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_systems(Update, collide_projectiles);
+
+        // Two distinct entities to attribute shots to.
+        let owner_a = app.world_mut().spawn_empty().id();
+        let owner_b = app.world_mut().spawn_empty().id();
+
+        // Enemy shots overlapping at the same spot: both should be destroyed.
+        app.world_mut()
+            .spawn((Projectile, ProjectileOwner(owner_a), NetPos(Vec2::ZERO)));
+        app.world_mut()
+            .spawn((Projectile, ProjectileOwner(owner_b), NetPos(Vec2::ZERO)));
+
+        // Two of owner_a's own shots overlapping: should pass through untouched.
+        let friendly = Vec2::new(100.0, 0.0);
+        app.world_mut()
+            .spawn((Projectile, ProjectileOwner(owner_a), NetPos(friendly)));
+        app.world_mut()
+            .spawn((Projectile, ProjectileOwner(owner_a), NetPos(friendly)));
+
+        app.update();
+
+        let mut shots = app
+            .world_mut()
+            .query_filtered::<&ProjectileOwner, With<Projectile>>();
+        let survivors: Vec<Entity> = shots.iter(app.world()).map(|o| o.0).collect();
+        assert_eq!(
+            survivors.len(),
+            2,
+            "the enemy pair cancels; the friendly pair survives"
+        );
+        assert!(
+            survivors.iter().all(|&o| o == owner_a),
+            "only the same-owner (friendly) shots should remain"
         );
     }
 }
