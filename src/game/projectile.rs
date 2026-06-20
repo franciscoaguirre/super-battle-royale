@@ -17,14 +17,14 @@ use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::bot::{Bot, BotIntent};
-use super::combat::{DoubleShot, QuadShot, RapidFire, Zigzag};
+use super::combat::RapidFire;
 use super::map::{ArenaBounds, CurrentMap};
 use super::net::{NetPos, is_authoritative};
 use super::player::{Player, PlayerColor, PlayerIntent};
 use super::state::GameState;
 
 #[cfg(feature = "client")]
-use super::combat::{Dead, SpawnInvulnerability};
+use super::combat::{Dead, DoubleShot, QuadShot, SpawnInvulnerability, Zigzag};
 #[cfg(feature = "client")]
 use super::net::is_offline;
 

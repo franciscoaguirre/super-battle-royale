@@ -214,7 +214,9 @@ mod tests {
     use super::*;
     use crate::game::combat::CombatPlugin;
     use crate::game::map::{CurrentMap, TileMap};
+    use crate::game::net::NetPos;
     use crate::game::net::NetRole;
+    use crate::game::shield::{ShieldCharge, ShieldPlugin, ShieldState, ShieldStatus, Shielding};
     use crate::game::state::MatchConfig;
     use bevy::state::app::StatesPlugin;
     use std::time::Duration;
@@ -223,7 +225,13 @@ mod tests {
     /// spawn plugins), so the only combatants are the ones the test spawns.
     fn test_app() -> App {
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin, MatchFlowPlugin));
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            CombatPlugin,
+            ShieldPlugin,
+            MatchFlowPlugin,
+        ));
         app.insert_resource(NetRole::Offline);
         app.insert_resource(CurrentMap(TileMap::parse("wsw")));
         app.init_resource::<MatchConfig>();
@@ -313,5 +321,81 @@ mod tests {
         assert_eq!(info.map_index, 1 % MAPS.len() as u8);
         assert_eq!(info.round, 1);
         assert_eq!(info.phase, MatchPhase::Playing);
+    }
+
+    /// Regression: the shield must be fully reset at the start of a new round,
+    /// even for the surviving winner that carried an active shield into the
+    /// intermission. Without the reset, the absolute-time active timer expires
+    /// during `GameOver` and leaves the player on cooldown.
+    #[test]
+    fn shield_resets_between_rounds() {
+        let mut app = test_app();
+        let winner = app
+            .world_mut()
+            .spawn((
+                Player,
+                PlayerColor::Blue,
+                NetPos(Vec2::ZERO),
+                ShieldState::default(),
+            ))
+            .id();
+        let loser = app
+            .world_mut()
+            .spawn((
+                Player,
+                PlayerColor::Red,
+                NetPos(Vec2::ZERO),
+                ShieldState::default(),
+            ))
+            .id();
+
+        // First tick grants health.
+        app.update();
+
+        // Raise the winner's shield and let it tick for a few frames.
+        app.world_mut()
+            .get_mut::<ShieldState>(winner)
+            .unwrap()
+            .requested = true;
+        for _ in 0..10 {
+            app.update();
+        }
+        assert!(
+            app.world().get::<Shielding>(winner).is_some(),
+            "winner should be shielding before the round ends"
+        );
+        assert!(
+            app.world().get::<ShieldCharge>(winner).unwrap().0 < 1.0,
+            "shield charge should have drained while active"
+        );
+
+        // Kill the other player to end the round.
+        app.world_mut().get_mut::<Health>(loser).unwrap().current = 0.0;
+        for _ in 0..10 {
+            app.update();
+        }
+        assert_eq!(current_state(&app), GameState::GameOver);
+
+        // Wait out the intermission and one extra frame for the state change.
+        for _ in 0..310 {
+            app.update();
+        }
+        assert_eq!(current_state(&app), GameState::Playing);
+
+        let state = app.world().get::<ShieldState>(winner).unwrap();
+        assert!(
+            matches!(state.status, ShieldStatus::Ready),
+            "winner's shield should be Ready after a new round starts"
+        );
+        assert_eq!(state.charge, 1.0, "winner's shield charge should be full");
+        assert!(
+            app.world().get::<Shielding>(winner).is_none(),
+            "winner should not have the Shielding marker at round start"
+        );
+        assert_eq!(
+            app.world().get::<ShieldCharge>(winner).unwrap().0,
+            1.0,
+            "replicated shield charge should be full"
+        );
     }
 }

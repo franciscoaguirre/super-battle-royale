@@ -15,7 +15,7 @@ use super::player::{PLAYER_SIZE, Player};
 use super::projectile::{
     ImpactKind, PROJECTILE_RADIUS, Projectile, ProjectileOwner, ProjectileVelocity, spawn_impact,
 };
-use super::shield::{ShieldState, is_parry_window, reflect_projectile};
+use super::shield::{ShieldState, ShieldStatus, Shielding, is_parry_window, reflect_projectile};
 use super::state::GameState;
 
 /// Starting (and maximum) player health. Kept low so every unblocked hit is
@@ -434,18 +434,29 @@ fn handle_deaths(
 }
 
 /// Revives every combatant carried over from a previous round (the persistent
-/// online players) when a new round starts: full health and `Dead` cleared.
+/// online players) when a new round starts: full health, `Dead` cleared, and
+/// shield reset so the new round begins with a fresh, ready shield.
 /// Fresh bots and the offline player are re-spawned each round and get full
-/// health from [`ensure_health`] instead; positions are set by `position_players`
-/// / `spawn_*`. Harmless on the first round (nothing has `Health` yet).
+/// health and a default shield from their spawn functions instead; positions are
+/// set by `position_players` / `spawn_*`. Harmless on the first round (nothing
+/// has `Health` yet).
 #[allow(clippy::type_complexity)]
 fn reset_combatants(
     mut commands: Commands,
-    mut combatants: Query<(Entity, &mut Health), Or<(With<Player>, With<Bot>)>>,
+    mut combatants: Query<
+        (Entity, &mut Health, Option<&mut ShieldState>),
+        Or<(With<Player>, With<Bot>)>,
+    >,
 ) {
-    for (entity, mut health) in &mut combatants {
+    for (entity, mut health, shield) in &mut combatants {
         health.current = health.max;
         commands.entity(entity).remove::<Dead>();
+        commands.entity(entity).remove::<Shielding>();
+        if let Some(mut state) = shield {
+            state.status = ShieldStatus::Ready;
+            state.charge = 1.0;
+            state.requested = false;
+        }
     }
 }
 

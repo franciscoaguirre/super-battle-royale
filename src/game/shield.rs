@@ -14,9 +14,11 @@ use bevy::asset::RenderAssetUsages;
 #[cfg(feature = "client")]
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-use super::combat::{Dead, SpawnInvulnerability};
+use super::combat::Dead;
 use super::net::{NetPos, is_authoritative};
 use super::player::PLAYER_SIZE;
+#[cfg(feature = "client")]
+use super::combat::SpawnInvulnerability;
 #[cfg(feature = "client")]
 use super::player::{Player, PlayerColor};
 use super::projectile::{PROJECTILE_RADIUS, ProjectileOwner, ProjectileVelocity};
@@ -290,7 +292,6 @@ fn attach_shield_visuals(
                 },
                 Transform::from_xyz(0.0, 0.0, 0.2),
                 Visibility::Hidden,
-                super::InGame,
             ))
             .id();
 
@@ -305,7 +306,6 @@ fn attach_shield_visuals(
                 },
                 Transform::from_xyz(0.0, 0.0, 0.3),
                 Visibility::Visible,
-                super::InGame,
             ))
             .id();
 
@@ -320,7 +320,6 @@ fn attach_shield_visuals(
                 },
                 Transform::from_xyz(0.0, 0.0, 0.35),
                 Visibility::Hidden,
-                super::InGame,
             ))
             .id();
 
@@ -419,4 +418,80 @@ fn update_shield_visuals(
 fn player_glow(color: PlayerColor) -> Color {
     use super::projectile::shot_glow;
     shot_glow(color).with_alpha(1.0)
+}
+
+#[cfg(all(test, feature = "client"))]
+mod tests {
+    use super::*;
+    use crate::game::InGame;
+    use crate::game::net::NetRole;
+    use crate::game::player::{Player, PlayerColor};
+    use bevy::state::app::StatesPlugin;
+
+    fn test_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin, ShieldPlugin));
+        app.insert_resource(NetRole::Offline);
+        app.insert_state(GameState::Playing);
+        // `init_shield_textures` needs `Assets<Image>` which MinimalPlugins does not
+        // register; provide the resource directly so the attach system can run.
+        app.insert_resource(ShieldTextures {
+            bubble: Handle::default(),
+            ring: Handle::default(),
+        });
+        app
+    }
+
+    /// Regression: shield visual children must not be tagged `InGame`, because
+    /// the actor (player/bot) is not `InGame` and survives round cleanup. If the
+    /// children are `InGame`, `cleanup_ingame` despawns them while the
+    /// `HasShieldVisuals` marker stays behind, preventing re-attachment.
+    #[test]
+    fn shield_visuals_survive_ingame_cleanup() {
+        let mut app = test_app();
+        let player = app
+            .world_mut()
+            .spawn((Player, PlayerColor::Blue, ShieldCharge(1.0)))
+            .id();
+
+        // Let Startup run once and attach the visual children.
+        app.update();
+        app.update();
+
+        let children_before: Vec<Entity> = app.world().get::<Children>(player).unwrap().to_vec();
+        assert!(!children_before.is_empty());
+        assert!(
+            app.world().get::<HasShieldVisuals>(player).is_some(),
+            "actor should be marked as having shield visuals"
+        );
+
+        // Simulate the same cleanup that runs OnExit(GameState::GameOver).
+        app.add_systems(
+            Update,
+            |mut commands: Commands, query: Query<Entity, With<InGame>>| {
+                for entity in &query {
+                    commands.entity(entity).despawn();
+                }
+            },
+        );
+        app.update();
+
+        let children_after: Vec<Entity> = app.world().get::<Children>(player).unwrap().to_vec();
+        assert_eq!(
+            children_before, children_after,
+            "shield visual children should survive InGame cleanup"
+        );
+        assert!(
+            app.world().get::<HasShieldVisuals>(player).is_some(),
+            "actor should still be marked as having shield visuals"
+        );
+
+        // None of the surviving children should be InGame.
+        for child in &children_after {
+            assert!(
+                app.world().get::<InGame>(*child).is_none(),
+                "shield visual child should not be InGame"
+            );
+        }
+    }
 }
