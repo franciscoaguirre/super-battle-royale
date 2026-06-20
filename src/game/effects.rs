@@ -154,6 +154,12 @@ fn spawn_impact_effects(
                 feedback.trauma = (feedback.trauma + 0.4).min(1.0);
                 feedback.aberration = (feedback.aberration + 0.04).min(ABERRATION_MAX);
             }
+            ImpactKind::Shield | ImpactKind::Parry => {
+                // Shield interactions get a smaller, whiter burst.
+                spawn_sparks(&mut commands, &textures.dot, pos.0, OBJECT_GLOW, 6, 100.0);
+                spawn_shockwave(&mut commands, &textures.ring, pos.0, OBJECT_GLOW);
+                feedback.trauma = (feedback.trauma + 0.15).min(1.0);
+            }
             ImpactKind::Pickup => {
                 // A small celebratory burst where a power-up was collected.
                 spawn_sparks(&mut commands, &textures.dot, pos.0, PICKUP_GLOW, 10, 130.0);

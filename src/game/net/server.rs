@@ -19,12 +19,16 @@ use bevy_replicon_renet::{
 
 use super::{
     ControllingClient, LastProcessedInput, MatchInfo, MatchPhase, NetPos, Owner, PlayerInput,
-    ShootRequest, StartMatch, Winner, YouAreOwner, is_server, protocol_id_for, register_protocol,
+    ShieldRequest, ShootRequest, StartMatch, Winner, YouAreOwner, is_server, protocol_id_for,
+    register_protocol,
 };
-use crate::game::combat::{Dead, DoubleShot, QuadShot, Zigzag};
+use crate::game::combat::{
+    Dead, DoubleShot, QuadShot, SpawnInvulnerability, Zigzag, give_spawn_invulnerability,
+};
 use crate::game::map::{self, CurrentMap};
 use crate::game::player::{Player, PlayerColor, PlayerIntent, apply_player_intent};
 use crate::game::projectile::{Facing, FireCooldown, ShotMods, try_fire};
+use crate::game::shield::{ShieldState, insert_shield};
 use crate::game::state::{GameState, MatchConfig};
 
 /// Maximum simultaneous players.
@@ -98,6 +102,7 @@ impl Plugin for ServerNetPlugin {
             .add_observer(on_client_authorized)
             .add_observer(on_start_match)
             .add_observer(receive_input)
+            .add_observer(receive_shield)
             .add_observer(receive_shoot);
     }
 }
@@ -164,6 +169,8 @@ fn on_client_authorized(
         InputQueue::default(),
         Replicated,
     ));
+    insert_shield(&mut commands, add.entity);
+    give_spawn_invulnerability(&mut commands, add.entity);
 
     let is_owner = index == 0;
     if is_owner {
@@ -260,8 +267,21 @@ fn dequeue_inputs(
     }
 }
 
+/// Updates the sending client's shield request. The authoritative [`tick_shields`]
+/// system picks this up on the next frame.
+fn receive_shield(
+    request: On<FromClient<ShieldRequest>>,
+    mut players: Query<&mut ShieldState, Without<Dead>>,
+) {
+    if let Some(entity) = request.client_id.entity()
+        && let Ok(mut shield) = players.get_mut(entity)
+    {
+        shield.requested = request.active;
+    }
+}
+
 /// Fires a shot for the sending client's player, in its tracked facing.
-/// Dead players (awaiting respawn) can't shoot.
+/// Dead, shielding, or spawn-invulnerable players can't shoot.
 #[allow(clippy::type_complexity)]
 fn receive_shoot(
     request: On<FromClient<ShootRequest>>,
@@ -276,7 +296,11 @@ fn receive_shoot(
             Option<&QuadShot>,
             Option<&Zigzag>,
         ),
-        Without<Dead>,
+        (
+            Without<Dead>,
+            Without<crate::game::shield::Shielding>,
+            Without<SpawnInvulnerability>,
+        ),
     >,
 ) {
     if let Some(entity) = request.client_id.entity()

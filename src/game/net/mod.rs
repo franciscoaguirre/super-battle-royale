@@ -24,17 +24,18 @@ pub mod server;
 
 pub use protocol::{
     ControllingClient, LastProcessedInput, MatchInfo, MatchPhase, NetPos, Owner, PlayerInput,
-    ShootRequest, StartMatch, Winner, YouAreOwner,
+    ShieldRequest, ShootRequest, StartMatch, Winner, YouAreOwner,
 };
 
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 
 use super::bot::Bot;
-use super::combat::{Dead, Health};
+use super::combat::{Dead, Health, SpawnInvulnerability};
 use super::pickup::PickupKind;
 use super::player::{Player, PlayerColor};
 use super::projectile::{Height, Impact, Projectile, ShotColor};
+use super::shield::{ShieldCharge, Shielding};
 
 /// Default UDP port the server listens on and clients connect to.
 pub const DEFAULT_PORT: u16 = 5000;
@@ -99,11 +100,15 @@ pub fn register_protocol(app: &mut App) {
         .replicate::<Dead>()
         .replicate::<Owner>()
         .replicate::<MatchInfo>()
+        .replicate::<Shielding>()
+        .replicate::<ShieldCharge>()
+        .replicate::<SpawnInvulnerability>()
         .replicate::<PickupKind>()
         .replicate::<LastProcessedInput>()
         .replicate::<ControllingClient>()
         .add_client_event::<PlayerInput>(Channel::Unreliable)
         .add_client_event::<ShootRequest>(Channel::Ordered)
+        .add_client_event::<ShieldRequest>(Channel::Ordered)
         .add_client_event::<StartMatch>(Channel::Ordered)
         .add_server_event::<YouAreOwner>(Channel::Ordered);
 }

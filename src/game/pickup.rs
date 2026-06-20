@@ -525,18 +525,18 @@ mod tests {
     fn heal_restores_health_and_clamps_to_max() {
         let mut app = test_app("wsw");
         let player = app.world_mut().spawn((Player, NetPos(Vec2::ZERO))).id();
-        app.update(); // ensure_health → full
-        app.world_mut().get_mut::<Health>(player).unwrap().current = 40.0;
+        app.update(); // ensure_health → full (2.0 / 2.0)
+        app.world_mut().get_mut::<Health>(player).unwrap().current = 1.0;
 
         drop_pickup(&mut app, PickupKind::Heal, Vec2::ZERO);
         app.update();
         assert_eq!(
             app.world().get::<Health>(player).unwrap().current,
-            40.0 + HEAL_AMOUNT,
-            "heal should add HEAL_AMOUNT below max"
+            2.0,
+            "heal should restore to max HP"
         );
 
-        // A second heal would overshoot 100 and must clamp to the player's max.
+        // A second heal must clamp to the player's max.
         drop_pickup(&mut app, PickupKind::Heal, Vec2::ZERO);
         app.update();
         let health = app.world().get::<Health>(player).unwrap();
@@ -578,8 +578,19 @@ mod tests {
     fn damage_boost_doubles_shot_damage() {
         let mut app = test_app("wsw");
         let shooter = app.world_mut().spawn((Player, NetPos(Vec2::ZERO))).id();
-        let target = app.world_mut().spawn((Player, NetPos(Vec2::ZERO))).id();
-        app.update(); // both full health
+        // Give the target enough health that a doubled 1-damage shot is visible.
+        let target = app
+            .world_mut()
+            .spawn((
+                Player,
+                NetPos(Vec2::ZERO),
+                Health {
+                    current: 4.0,
+                    max: 4.0,
+                },
+            ))
+            .id();
+        app.update();
         app.world_mut()
             .entity_mut(shooter)
             .insert(DamageBoost(Timer::from_seconds(5.0, TimerMode::Once)));
@@ -587,8 +598,8 @@ mod tests {
         app.world_mut()
             .spawn((Projectile, ProjectileOwner(shooter), NetPos(Vec2::ZERO)));
         app.update();
-        // Base 25 × 2 = 50 damage.
-        assert_eq!(app.world().get::<Health>(target).unwrap().current, 50.0);
+        // Base 1 × 2 = 2 damage.
+        assert_eq!(app.world().get::<Health>(target).unwrap().current, 2.0);
     }
 
     #[test]

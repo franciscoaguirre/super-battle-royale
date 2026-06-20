@@ -2,11 +2,14 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::combat::Dead;
+use super::combat::{Dead, SpawnInvulnerability, give_spawn_invulnerability};
 use super::map::{ArenaBounds, CurrentMap};
 use super::net::{NetPos, is_authoritative};
 use super::player::PlayerColor;
-use super::projectile::{Facing, FireCooldown, ShotMods, tick_cooldowns, try_fire};
+use super::projectile::{
+    Facing, FireCooldown, Projectile, ProjectileOwner, ShotMods, tick_cooldowns, try_fire,
+};
+use super::shield::{ShieldState, ShieldTickSet, insert_shield};
 use super::state::{GameState, MatchConfig};
 
 pub const BOT_SIZE: f32 = 32.0;
@@ -14,6 +17,9 @@ const BOT_SPEED: f32 = 180.0;
 const BOT_DETECTION_RANGE: f32 = 500.0;
 const BOT_FIRE_RANGE: f32 = 280.0;
 const BOT_AIM_THRESHOLD: f32 = 0.95;
+/// Distance at which a bot considers an incoming shot dangerous enough to raise
+/// its shield.
+const BOT_SHIELD_RANGE: f32 = 120.0;
 
 /// Marker for an bot. Replicated so clients know which entities to draw as
 /// bots; the AI state and intent stay server-side.
@@ -45,8 +51,9 @@ impl Plugin for BotPlugin {
             Update,
             (
                 select_bot_targets,
+                bot_shield.after(ShieldTickSet),
                 update_bot_intent,
-                apply_bot_intent,
+                apply_bot_intent.after(ShieldTickSet),
                 update_bot_facing,
                 bot_shoot.after(tick_cooldowns),
             )
@@ -77,18 +84,22 @@ fn spawn_bots(mut commands: Commands, map: Res<CurrentMap>, config: Res<MatchCon
             spawns[(i + 1) % spawns.len()]
         };
 
-        commands.spawn((
-            Bot,
-            BotAI {
-                target: None,
-                wander: Vec2::new(0.6, 0.8).normalize(),
-            },
-            BotIntent::default(),
-            PlayerColor::Red,
-            NetPos(pos),
-            Replicated,
-            super::InGame,
-        ));
+        let entity = commands
+            .spawn((
+                Bot,
+                BotAI {
+                    target: None,
+                    wander: Vec2::new(0.6, 0.8).normalize(),
+                },
+                BotIntent::default(),
+                PlayerColor::Red,
+                NetPos(pos),
+                Replicated,
+                super::InGame,
+            ))
+            .id();
+        insert_shield(&mut commands, entity);
+        give_spawn_invulnerability(&mut commands, entity);
     }
 }
 
@@ -100,7 +111,10 @@ fn spawn_bots(mut commands: Commands, map: Res<CurrentMap>, config: Res<MatchCon
 #[allow(clippy::type_complexity)]
 fn select_bot_targets(
     mut bots: Query<(Entity, &NetPos, &mut BotAI), (With<Bot>, Without<Dead>)>,
-    targets: Query<(Entity, &NetPos), (Or<(With<super::player::Player>, With<Bot>)>, Without<Dead>)>,
+    targets: Query<
+        (Entity, &NetPos),
+        (Or<(With<super::player::Player>, With<Bot>)>, Without<Dead>),
+    >,
 ) {
     for (bot_entity, bot_pos, mut ai) in &mut bots {
         let mut nearest = None;
@@ -163,12 +177,16 @@ fn update_bot_intent(
 
 /// Advances every bot's authoritative position from its intent, sliding along
 /// map walls and clamped to the arena. Mirrors [`apply_player_intent`].
+/// Shielding bots are rooted.
 #[allow(clippy::type_complexity)]
-fn apply_bot_intent(
+pub(crate) fn apply_bot_intent(
     time: Res<Time>,
     bounds: Res<ArenaBounds>,
     map: Res<CurrentMap>,
-    mut query: Query<(&mut NetPos, &BotIntent), (With<Bot>, Without<Dead>)>,
+    mut query: Query<
+        (&mut NetPos, &BotIntent),
+        (With<Bot>, Without<Dead>, Without<super::shield::Shielding>),
+    >,
 ) {
     let half = BOT_SIZE / 2.0;
     for (mut pos, intent) in &mut query {
@@ -186,6 +204,23 @@ fn apply_bot_intent(
         }
 
         pos.set_if_neq(NetPos(bounds.clamp(next, half)));
+    }
+}
+
+/// Raises a bot's shield when a hostile projectile is close. This naturally
+/// blocks shots; occasional perfect parries happen when activation lines up with
+/// impact timing.
+#[allow(clippy::type_complexity)]
+fn bot_shield(
+    mut bots: Query<(Entity, &NetPos, &mut ShieldState), (With<Bot>, Without<Dead>)>,
+    projectiles: Query<(&NetPos, &ProjectileOwner), With<Projectile>>,
+) {
+    let range_sq = BOT_SHIELD_RANGE * BOT_SHIELD_RANGE;
+    for (entity, pos, mut shield) in &mut bots {
+        let threatened = projectiles
+            .iter()
+            .any(|(p_pos, owner)| owner.0 != entity && p_pos.0.distance_squared(pos.0) < range_sq);
+        shield.requested = threatened;
     }
 }
 
@@ -213,7 +248,12 @@ fn bot_shoot(
             &PlayerColor,
             &BotAI,
         ),
-        (With<Bot>, Without<Dead>),
+        (
+            With<Bot>,
+            Without<Dead>,
+            Without<super::shield::Shielding>,
+            Without<SpawnInvulnerability>,
+        ),
     >,
     targets: Query<&NetPos, (Or<(With<super::player::Player>, With<Bot>)>, Without<Dead>)>,
 ) {

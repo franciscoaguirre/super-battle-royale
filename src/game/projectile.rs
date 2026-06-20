@@ -1,13 +1,12 @@
-//! Shooting: straight-flying, slowly-falling projectiles.
+//! Shooting: straight-flying projectiles.
 //!
 //! Press Space to fire a shot in the player's last-moved direction. The shot
-//! travels at a constant horizontal speed while its altitude ([`Height`]) sinks
-//! under gentle gravity — no upward lob — and it "crashes" (despawns) once the
-//! altitude reaches the ground. PvP damage on contact lives in `combat.rs`.
+//! travels at a constant horizontal speed and altitude. PvP damage, shield
+//! blocks, and parries live in `combat.rs`.
 //!
 //! Like every dynamic entity, a projectile's ground position lives in [`NetPos`]
-//! and replicates; its altitude replicates via [`Height`] so clients can draw the
-//! descent; its velocity is server/sim-only. Firing and motion run on the
+//! and replicates; its altitude replicates via [`Height`] so clients can draw it
+//! above the floor; its velocity is server/sim-only. Firing and motion run on the
 //! authoritative side (offline + server); rendering runs on the client.
 
 use bevy::prelude::*;
@@ -15,27 +14,24 @@ use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::bot::{Bot, BotIntent};
-use super::combat::RapidFire;
+use super::combat::{DoubleShot, QuadShot, RapidFire, Zigzag};
 use super::map::{ArenaBounds, CurrentMap};
 use super::net::{NetPos, is_authoritative};
 use super::player::{Player, PlayerColor, PlayerIntent};
 use super::state::GameState;
 
 #[cfg(feature = "client")]
-use super::combat::{Dead, DoubleShot, QuadShot, Zigzag};
+use super::combat::{Dead, SpawnInvulnerability};
 #[cfg(feature = "client")]
 use super::net::is_offline;
 
 /// Constant horizontal speed of a shot, in world units per second.
 const PROJECTILE_SPEED: f32 = 360.0;
-/// Downward acceleration applied to a shot's altitude. Deliberately small so the
-/// shot flies nearly straight and sinks gradually.
-const GRAVITY: f32 = 60.0;
-/// Altitude a shot starts at (vertical velocity starts at zero). Kept low so the
-/// shot leaves around the player's body rather than above their head.
+/// Altitude a shot starts at and maintains. Kept low so the shot leaves around
+/// the player's body rather than above their head.
 const INITIAL_HEIGHT: f32 = 12.0;
-/// A shot crashes once its altitude reaches this "ground" level.
-const GROUND_LEVEL: f32 = 0.0;
+/// Gravity applied to a shot's vertical velocity each frame (world units/s²).
+const GRAVITY: f32 = 120.0;
 /// Minimum seconds between shots from one player.
 const FIRE_COOLDOWN: f32 = 0.35;
 /// How much faster the fire-rate cooldown ticks while a player holds [`RapidFire`].
@@ -175,8 +171,12 @@ pub enum ImpactKind {
     /// Crashed into the ground.
     #[default]
     Ground,
-    /// Struck a player.
+    /// Struck a player or bot.
     Object,
+    /// Was blocked by a raised shield (after the parry window).
+    Shield,
+    /// Was reflected by a perfectly-timed shield parry.
+    Parry,
     /// A power-up was collected.
     Pickup,
 }
@@ -327,7 +327,8 @@ fn simulate_projectiles(
         let out_of_bounds =
             p.x < bounds.min.x || p.x > bounds.max.x || p.y < bounds.min.y || p.y > bounds.max.y;
         let hit_wall = map.0.circle_intersects_wall(p, PROJECTILE_RADIUS);
-        if height.0 <= GROUND_LEVEL || hit_wall {
+        let hit_ground = height.0 <= 0.0;
+        if hit_wall || hit_ground {
             spawn_impact(&mut commands, ImpactKind::Ground, pos.0);
             commands.entity(entity).despawn();
         } else if out_of_bounds {
@@ -446,7 +447,12 @@ fn offline_shoot(
             Option<&QuadShot>,
             Option<&Zigzag>,
         ),
-        (With<Player>, Without<Dead>),
+        (
+            With<Player>,
+            Without<Dead>,
+            Without<super::shield::Shielding>,
+            Without<SpawnInvulnerability>,
+        ),
     >,
 ) {
     if !keys.just_pressed(KeyCode::Space) {
@@ -575,7 +581,8 @@ fn play_impact_sounds(
     for impact in &impacts {
         let path = match impact.0 {
             ImpactKind::Ground => HIT_GROUND_SOUND,
-            ImpactKind::Object => HIT_OBJECT_SOUND,
+            ImpactKind::Object | ImpactKind::Shield => HIT_OBJECT_SOUND,
+            ImpactKind::Parry => SHOOT_SOUND,
             // Pickups get a visual pop only for now (no fitting chime asset yet).
             ImpactKind::Pickup => continue,
         };

@@ -7,6 +7,7 @@ pub mod net;
 pub mod pickup;
 pub mod player;
 pub mod projectile;
+pub mod shield;
 pub mod state;
 
 // Rendering-only subsystems live in the windowed client; the headless server
@@ -53,6 +54,7 @@ impl Plugin for GamePlugin {
                 pickup::PickupPlugin,
                 player::PlayerPlugin,
                 projectile::ProjectilePlugin,
+                shield::ShieldPlugin,
             ))
             // Cleanup runs when LEAVING the GameOver announcement (the map-switch
             // point), not on leaving Playing — so the scene stays frozen and

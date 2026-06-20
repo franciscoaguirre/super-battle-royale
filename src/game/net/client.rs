@@ -18,7 +18,7 @@ use bevy_replicon_renet::{
 
 use super::{
     ControllingClient, LastProcessedInput, NetPos, PlayerInput, Predicted, PredictedPos,
-    ShootRequest, protocol_id_for, register_protocol,
+    ShieldRequest, ShootRequest, protocol_id_for, register_protocol,
 };
 use crate::game::combat::Dead;
 use crate::game::map::{ArenaBounds, CurrentMap, TileMap};
@@ -68,7 +68,7 @@ impl Plugin for ClientNetPlugin {
             // Identify our own player + fire requests run every frame.
             .add_systems(
                 Update,
-                (tag_local_player, send_shoot_request)
+                (tag_local_player, send_shoot_request, send_shield_request)
                     .run_if(in_state(ClientState::Connected))
                     .run_if(in_state(GameState::Playing)),
             )
@@ -213,6 +213,20 @@ fn reconcile_pos(
 fn send_shoot_request(mut commands: Commands, input: Res<ButtonInput<KeyCode>>) {
     if input.just_pressed(KeyCode::Space) {
         commands.client_trigger(ShootRequest);
+    }
+}
+
+/// Sends shield press/release events only on state changes. The server mirrors
+/// this into the player's [`ShieldState::requested`] flag.
+fn send_shield_request(
+    mut commands: Commands,
+    input: Res<ButtonInput<KeyCode>>,
+    mut last: Local<bool>,
+) {
+    let pressed = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
+    if pressed != *last {
+        commands.client_trigger(ShieldRequest { active: pressed });
+        *last = pressed;
     }
 }
 

@@ -58,6 +58,16 @@ pub struct ControllingClient(pub u64);
 #[derive(Event, Serialize, Deserialize, Clone, Copy, Debug, Default)]
 pub struct ShootRequest;
 
+/// Shield request sent from a client to the server whenever the shield button
+/// is pressed or released.
+///
+/// `active` is the desired state: true while the button is held, false on
+/// release. Sent reliably because it is a discrete state change.
+#[derive(Event, Serialize, Deserialize, Clone, Copy, Debug, Default)]
+pub struct ShieldRequest {
+    pub active: bool,
+}
+
 /// Marks the player entity belonging to the game's owner: the first client to
 /// join (or the local player when offline). Replicated so the server stays the
 /// authority on who may start the match; clients learn they are the owner through
