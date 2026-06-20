@@ -22,7 +22,9 @@ use super::{
 };
 use crate::game::combat::Dead;
 use crate::game::map::{ArenaBounds, CurrentMap, TileMap};
-use crate::game::player::{FIXED_DT, Player, input_direction, step_player};
+use crate::game::player::{
+    FIXED_DT, Player, input_direction, shield_pressed, shoot_just_pressed, step_player,
+};
 use crate::game::state::GameState;
 
 /// Largest number of un-acknowledged inputs the client keeps for replay before
@@ -144,9 +146,10 @@ fn tag_local_player(
 /// acknowledged inputs, and replay the rest through the shared [`step_player`] to
 /// recompute [`PredictedPos`]. The predicted position is what the local player
 /// renders from, so movement responds with no round-trip.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn predict_and_reconcile(
     keys: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
     mut commands: Commands,
     mut seq: ResMut<InputSeq>,
     mut history: ResMut<InputHistory>,
@@ -159,7 +162,7 @@ fn predict_and_reconcile(
 ) {
     // Always sample, buffer, and send this tick's input — even before our player
     // is tagged — so the server starts moving us immediately.
-    let dir = input_direction(&keys);
+    let dir = input_direction(&keys, gamepads.iter().next());
     seq.0 = seq.0.wrapping_add(1);
     let this_seq = seq.0;
     history.0.push_back((this_seq, dir));
@@ -210,8 +213,12 @@ fn reconcile_pos(
 
 /// Asks the server to fire when the player presses Space. The server picks the
 /// direction from the player's tracked facing.
-fn send_shoot_request(mut commands: Commands, input: Res<ButtonInput<KeyCode>>) {
-    if input.just_pressed(KeyCode::Space) {
+fn send_shoot_request(
+    mut commands: Commands,
+    input: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
+) {
+    if shoot_just_pressed(&input, gamepads.iter().next()) {
         commands.client_trigger(ShootRequest);
     }
 }
@@ -221,9 +228,10 @@ fn send_shoot_request(mut commands: Commands, input: Res<ButtonInput<KeyCode>>) 
 fn send_shield_request(
     mut commands: Commands,
     input: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
     mut last: Local<bool>,
 ) {
-    let pressed = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
+    let pressed = shield_pressed(&input, gamepads.iter().next());
     if pressed != *last {
         commands.client_trigger(ShieldRequest { active: pressed });
         *last = pressed;

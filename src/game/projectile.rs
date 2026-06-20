@@ -20,6 +20,8 @@ use super::bot::{Bot, BotIntent};
 use super::combat::RapidFire;
 use super::map::{ArenaBounds, CurrentMap};
 use super::net::{NetPos, is_authoritative};
+#[cfg(feature = "client")]
+use super::player::shoot_just_pressed;
 use super::player::{Player, PlayerColor, PlayerIntent};
 use super::state::GameState;
 
@@ -458,6 +460,7 @@ fn spawn_projectile(
 #[allow(clippy::type_complexity)]
 fn offline_shoot(
     keys: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
     mut commands: Commands,
     mut players: Query<
         (
@@ -478,7 +481,7 @@ fn offline_shoot(
         ),
     >,
 ) {
-    if !keys.just_pressed(KeyCode::Space) {
+    if !shoot_just_pressed(&keys, gamepads.iter().next()) {
         return;
     }
     for (entity, pos, facing, mut cooldown, color, double, quad, zigzag) in &mut players {
