@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::bot::Bot;
 use super::net::{NetPos, is_authoritative};
+use super::pickup::PickupKind;
 use super::player::{PLAYER_SIZE, Player};
 use super::projectile::{
     ImpactKind, PROJECTILE_RADIUS, Projectile, ProjectileOwner, ProjectileVelocity, spawn_impact,
@@ -135,6 +136,26 @@ buff!(
     Zigzag
 );
 
+/// One active power-up for HUD display: which kind it is plus its countdown.
+/// `kind` reuses [`PickupKind`] so the client can index the same glyph art and
+/// glow colour the pickups use.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct BuffStatus {
+    pub kind: PickupKind,
+    /// Seconds of effect remaining.
+    pub remaining: f32,
+    /// The buff's full duration, so the HUD can draw a depleting bar.
+    pub total: f32,
+}
+
+/// Replicated, client-facing summary of a player's active timed buffs, kept in a
+/// stable order by [`sync_active_buffs`]. The buff components themselves stay
+/// authoritative-only; this small aggregate is what the HUD reads. Present only
+/// while at least one buff is active (removed when the last one expires), so idle
+/// players cost no replication traffic.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct ActiveBuffs(pub Vec<BuffStatus>);
+
 /// Ticks one kind of timed buff and strips it from any entity whose timer has
 /// run out, so buffs expire on their own. Registered once per buff type.
 fn tick_buff<B: Component<Mutability = Mutable> + BuffTimer>(
@@ -147,6 +168,90 @@ fn tick_buff<B: Component<Mutability = Mutable> + BuffTimer>(
             commands.entity(entity).remove::<B>();
         }
     }
+}
+
+/// Builds a [`BuffStatus`] from a buff's timer.
+fn buff_status(kind: PickupKind, timer: &Timer) -> BuffStatus {
+    BuffStatus {
+        kind,
+        remaining: timer.remaining_secs(),
+        total: timer.duration().as_secs_f32(),
+    }
+}
+
+/// Rebuilds each player's replicated [`ActiveBuffs`] summary from its live buff
+/// components so the client HUD can show them. Runs after the `tick_buff` systems
+/// (so an expired buff is gone the same frame) and only mutates/inserts/removes
+/// the component when its contents actually change, so replicon resends it only
+/// while a buff's countdown is ticking — and not at all for an unbuffed player.
+#[allow(clippy::type_complexity)]
+fn sync_active_buffs(
+    mut commands: Commands,
+    mut players: Query<
+        (
+            Entity,
+            Option<&mut ActiveBuffs>,
+            Option<&SpeedBoost>,
+            Option<&RapidFire>,
+            Option<&DamageBoost>,
+            Option<&DoubleShot>,
+            Option<&QuadShot>,
+            Option<&Zigzag>,
+        ),
+        With<Player>,
+    >,
+) {
+    for (entity, active, speed, rapid, damage, double, quad, zigzag) in &mut players {
+        // Fixed order so HUD icons never reorder frame-to-frame.
+        let mut built = Vec::new();
+        if let Some(b) = speed {
+            built.push(buff_status(PickupKind::Speed, &b.0));
+        }
+        if let Some(b) = rapid {
+            built.push(buff_status(PickupKind::RapidFire, &b.0));
+        }
+        if let Some(b) = damage {
+            built.push(buff_status(PickupKind::Damage, &b.0));
+        }
+        if let Some(b) = double {
+            built.push(buff_status(PickupKind::DoubleShot, &b.0));
+        }
+        if let Some(b) = quad {
+            built.push(buff_status(PickupKind::QuadShot, &b.0));
+        }
+        if let Some(b) = zigzag {
+            built.push(buff_status(PickupKind::Zigzag, &b.0));
+        }
+
+        match active {
+            Some(mut active) => {
+                if built.is_empty() {
+                    commands.entity(entity).remove::<ActiveBuffs>();
+                } else if active.0 != built {
+                    active.0 = built;
+                }
+            }
+            None if !built.is_empty() => {
+                commands.entity(entity).insert(ActiveBuffs(built));
+            }
+            None => {}
+        }
+    }
+}
+
+/// Removes every timed buff component from `entity`. Called on round/map change
+/// so power-ups don't leak into the next map: persistent online players survive
+/// the round, so without this their buff timers would keep ticking. Removing an
+/// absent component is a no-op, so this is safe for fresh spawns and bots.
+pub(crate) fn strip_buffs(mut entity: EntityCommands) {
+    entity.remove::<(
+        SpeedBoost,
+        RapidFire,
+        DamageBoost,
+        DoubleShot,
+        QuadShot,
+        Zigzag,
+    )>();
 }
 
 pub struct CombatPlugin;
@@ -177,18 +282,24 @@ impl Plugin for CombatPlugin {
             reset_combatants.run_if(is_authoritative),
         );
 
-        // Authoritative: expire timed power-up buffs once their timers run out.
-        // Unordered — a one-frame-stale buff is imperceptible.
+        // Authoritative: expire timed power-up buffs once their timers run out,
+        // then refresh the replicated HUD summary. The tick set is unordered
+        // among itself (a one-frame-stale buff is imperceptible) but runs before
+        // `sync_active_buffs` so the summary reflects this frame's expirations.
         app.add_systems(
             Update,
             (
-                tick_buff::<SpeedBoost>,
-                tick_buff::<RapidFire>,
-                tick_buff::<DamageBoost>,
-                tick_buff::<DoubleShot>,
-                tick_buff::<QuadShot>,
-                tick_buff::<Zigzag>,
+                (
+                    tick_buff::<SpeedBoost>,
+                    tick_buff::<RapidFire>,
+                    tick_buff::<DamageBoost>,
+                    tick_buff::<DoubleShot>,
+                    tick_buff::<QuadShot>,
+                    tick_buff::<Zigzag>,
+                ),
+                sync_active_buffs,
             )
+                .chain()
                 .run_if(in_state(GameState::Playing))
                 .run_if(is_authoritative),
         );
@@ -434,8 +545,9 @@ fn handle_deaths(
 }
 
 /// Revives every combatant carried over from a previous round (the persistent
-/// online players) when a new round starts: full health, `Dead` cleared, and
-/// shield reset so the new round begins with a fresh, ready shield.
+/// online players) when a new round starts: full health, `Dead` cleared, shield
+/// reset so the new round begins with a fresh, ready shield, and timed power-ups
+/// stripped so they don't leak across maps.
 /// Fresh bots and the offline player are re-spawned each round and get full
 /// health and a default shield from their spawn functions instead; positions are
 /// set by `position_players` / `spawn_*`. Harmless on the first round (nothing
@@ -457,6 +569,9 @@ fn reset_combatants(
             state.charge = 1.0;
             state.requested = false;
         }
+        // Clear any power-ups so they don't carry into the next map; the next
+        // `sync_active_buffs` then drops the (now-empty) replicated summary.
+        strip_buffs(commands.entity(entity));
     }
 }
 

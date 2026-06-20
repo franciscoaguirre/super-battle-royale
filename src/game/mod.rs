@@ -21,6 +21,8 @@ pub mod effects;
 #[cfg(feature = "client")]
 pub mod footsteps;
 #[cfg(feature = "client")]
+pub mod hud;
+#[cfg(feature = "client")]
 pub mod lobby;
 #[cfg(feature = "client")]
 pub mod ping;
@@ -67,6 +69,7 @@ impl Plugin for GamePlugin {
             crt::CrtPlugin,
             effects::EffectsPlugin,
             footsteps::FootstepsPlugin,
+            hud::HudPlugin,
             lobby::LobbyPlugin,
             music::MusicPlugin,
             ping::PingPlugin,
