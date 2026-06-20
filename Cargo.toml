@@ -49,6 +49,7 @@ bevy_replicon = { version = "0.40.3", default-features = false }
 bevy_replicon_renet = { version = "0.16.0", default-features = false, features = [
     "renet_netcode",
 ] }
+pathfinding = "4.15.0"
 serde = { version = "1", features = ["derive"] }
 
 # Enable a small amount of optimization in the dev profile.
