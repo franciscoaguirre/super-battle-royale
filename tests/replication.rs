@@ -26,13 +26,15 @@ use bevy_replicon_renet::{
 };
 
 use super_battle_royale::game::bot::Bot;
+use super_battle_royale::game::combat::{Dead, Health, SpawnInvulnerability};
 use super_battle_royale::game::net::{
-    ControllingClient, LastProcessedInput, NetPos, PlayerInput, ShootRequest, protocol_id_for,
-    register_protocol,
+    ControllingClient, LastProcessedInput, MatchInfo, NetPos, NetworkAppExt, Owner, PlayerInput,
+    ShieldRequest, ShootRequest, StartMatch, YouAreOwner, apply_network_registry, protocol_id_for,
 };
 use super_battle_royale::game::pickup::PickupKind;
 use super_battle_royale::game::player::{Player, PlayerColor};
-use super_battle_royale::game::projectile::Projectile;
+use super_battle_royale::game::projectile::{Impact, Projectile, ShotColor};
+use super_battle_royale::game::shield::{ShieldCharge, Shielding};
 
 const PLAYER_POS: Vec2 = Vec2::new(12.0, -34.0);
 const BOT_POS: Vec2 = Vec2::new(-5.0, 7.0);
@@ -129,6 +131,23 @@ fn rejects_client_with_wrong_join_code() {
     assert!(
         !client_app.world().resource::<RenetClient>().is_connected(),
         "a client with the wrong join code must not connect"
+    );
+}
+
+/// The production client and server must register exactly the same set of
+/// networked components and events. Replicon summarizes that set in a
+/// [`ProtocolHash`]; if the two sides differ, a real connection will be refused
+/// with a cryptic mismatch error. This test fails fast with a clear message.
+#[test]
+fn client_and_server_protocol_hashes_match() {
+    let server_app = build_app();
+    let client_app = build_app();
+
+    let server_hash = *server_app.world().resource::<ProtocolHash>();
+    let client_hash = *client_app.world().resource::<ProtocolHash>();
+    assert_eq!(
+        server_hash, client_hash,
+        "client and server protocol hashes must match; a mismatch usually means one side forgot to register a networked component/event"
     );
 }
 
@@ -845,6 +864,34 @@ fn replicates_prediction_components() {
     );
 }
 
+/// Registers every networked component and event for the headless integration
+/// tests. This is the test-only equivalent of the per-module registrations done
+/// by the gameplay plugins in production code.
+fn register_test_protocol(app: &mut App) {
+    app.register_networked::<NetPos>()
+        .register_networked::<Player>()
+        .register_networked::<PlayerColor>()
+        .register_networked::<Health>()
+        .register_networked::<Bot>()
+        .register_networked::<Projectile>()
+        .register_networked::<ShotColor>()
+        .register_networked::<Impact>()
+        .register_networked::<Dead>()
+        .register_networked::<Owner>()
+        .register_networked::<MatchInfo>()
+        .register_networked::<Shielding>()
+        .register_networked::<ShieldCharge>()
+        .register_networked::<SpawnInvulnerability>()
+        .register_networked::<PickupKind>()
+        .register_networked::<LastProcessedInput>()
+        .register_networked::<ControllingClient>()
+        .register_networked::<PlayerInput>()
+        .register_networked::<ShootRequest>()
+        .register_networked::<ShieldRequest>()
+        .register_networked::<StartMatch>()
+        .register_networked::<YouAreOwner>();
+}
+
 /// Builds a headless app with the networking stack and our protocol registered.
 fn build_app() -> App {
     let mut app = App::new();
@@ -855,7 +902,8 @@ fn build_app() -> App {
         RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
         RepliconRenetPlugins,
     ));
-    register_protocol(&mut app);
+    register_test_protocol(&mut app);
+    apply_network_registry(&mut app);
     app.finish();
     app
 }

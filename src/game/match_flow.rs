@@ -14,7 +14,9 @@ use bevy::prelude::*;
 use super::bot::Bot;
 use super::combat::{Dead, Health};
 use super::map::{self, MAPS};
-use super::net::{MatchInfo, MatchPhase, Winner, is_authoritative, is_online_client};
+use super::net::{
+    MatchInfo, MatchPhase, NetworkAppExt, Winner, is_authoritative, is_online_client,
+};
 use super::player::{Player, PlayerColor};
 use super::state::{GameState, MatchConfig};
 
@@ -29,6 +31,10 @@ pub struct MatchFlowPlugin;
 
 impl Plugin for MatchFlowPlugin {
     fn build(&self, app: &mut App) {
+        app.register_networked::<MatchInfo>()
+            .register_networked::<super::net::StartMatch>()
+            .register_networked::<super::net::YouAreOwner>();
+
         // Authoritative: detect the winner, run the announcement, advance maps.
         app.add_systems(
             Update,

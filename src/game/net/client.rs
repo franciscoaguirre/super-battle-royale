@@ -17,12 +17,12 @@ use bevy_replicon_renet::{
 };
 
 use super::{
-    ControllingClient, LastProcessedInput, NetPos, PlayerInput, Predicted, PredictedPos,
-    ShieldRequest, ShootRequest, protocol_id_for, register_protocol,
+    ControllingClient, LastProcessedInput, LatestLocalInput, NetPos, PlayerInput, Predicted,
+    PredictedPos, ShieldRequest, ShootRequest, apply_network_registry, protocol_id_for,
 };
 use crate::game::combat::Dead;
 use crate::game::map::{ArenaBounds, CurrentMap, TileMap};
-use crate::game::player::{FIXED_DT, Player, input_direction, step_player};
+use crate::game::player::{FIXED_DT, Player, step_player};
 use crate::game::state::GameState;
 
 /// Largest number of un-acknowledged inputs the client keeps for replay before
@@ -59,16 +59,16 @@ pub struct ClientNetPlugin {
 impl Plugin for ClientNetPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((RepliconPlugins, RepliconRenetPlugins));
-        register_protocol(app);
+        apply_network_registry(app);
         app.insert_resource(ServerEndpoint(self.server_addr))
             .insert_resource(ClientProtocolId(protocol_id_for(&self.join_code)))
             .init_resource::<InputSeq>()
             .init_resource::<InputHistory>()
             .add_systems(Startup, setup_client)
-            // Identify our own player + fire requests run every frame.
+            // Identify our own player + route sampled input to network events.
             .add_systems(
                 Update,
-                (tag_local_player, send_shoot_request, send_shield_request)
+                (tag_local_player, client_input_router)
                     .run_if(in_state(ClientState::Connected))
                     .run_if(in_state(GameState::Playing)),
             )
@@ -146,7 +146,7 @@ fn tag_local_player(
 /// renders from, so movement responds with no round-trip.
 #[allow(clippy::type_complexity)]
 fn predict_and_reconcile(
-    keys: Res<ButtonInput<KeyCode>>,
+    latest: Res<LatestLocalInput>,
     mut commands: Commands,
     mut seq: ResMut<InputSeq>,
     mut history: ResMut<InputHistory>,
@@ -158,8 +158,9 @@ fn predict_and_reconcile(
     >,
 ) {
     // Always sample, buffer, and send this tick's input — even before our player
-    // is tagged — so the server starts moving us immediately.
-    let dir = input_direction(&keys);
+    // is tagged — so the server starts moving us immediately. The input was already
+    // sampled in Update into LatestLocalInput.
+    let dir = latest.0.dir;
     seq.0 = seq.0.wrapping_add(1);
     let this_seq = seq.0;
     history.0.push_back((this_seq, dir));
@@ -208,25 +209,15 @@ fn reconcile_pos(
     pos
 }
 
-/// Asks the server to fire when the player presses Space. The server picks the
-/// direction from the player's tracked facing.
-fn send_shoot_request(mut commands: Commands, input: Res<ButtonInput<KeyCode>>) {
-    if input.just_pressed(KeyCode::Space) {
+/// Online client router: turns the sampled [`LatestLocalInput`] into the network
+/// events the server expects. Movement is handled by [`predict_and_reconcile`] on
+/// the fixed tick; this system routes shoot/shield.
+fn client_input_router(mut commands: Commands, input: Res<LatestLocalInput>) {
+    if input.0.shoot {
         commands.client_trigger(ShootRequest);
     }
-}
-
-/// Sends shield press/release events only on state changes. The server mirrors
-/// this into the player's [`ShieldState::requested`] flag.
-fn send_shield_request(
-    mut commands: Commands,
-    input: Res<ButtonInput<KeyCode>>,
-    mut last: Local<bool>,
-) {
-    let pressed = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
-    if pressed != *last {
-        commands.client_trigger(ShieldRequest { active: pressed });
-        *last = pressed;
+    if let Some(active) = input.0.shield_change {
+        commands.client_trigger(ShieldRequest { active });
     }
 }
 

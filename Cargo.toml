@@ -50,6 +50,7 @@ bevy_replicon_renet = { version = "0.16.0", default-features = false, features =
     "renet_netcode",
 ] }
 serde = { version = "1", features = ["derive"] }
+super-battle-royale-macros = { path = "macros" }
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]

@@ -19,8 +19,8 @@ use bevy_replicon_renet::{
 
 use super::{
     ControllingClient, LastProcessedInput, MatchInfo, MatchPhase, NetPos, Owner, PlayerInput,
-    ShieldRequest, ShootRequest, StartMatch, Winner, YouAreOwner, is_server, protocol_id_for,
-    register_protocol,
+    ShieldRequest, ShootRequest, StartMatch, Winner, YouAreOwner, apply_network_registry,
+    is_server, protocol_id_for, resolve_spawn_context,
 };
 use crate::game::combat::{
     Dead, DoubleShot, QuadShot, SpawnInvulnerability, Zigzag, give_spawn_invulnerability,
@@ -81,7 +81,7 @@ pub struct ServerNetPlugin {
 impl Plugin for ServerNetPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((RepliconPlugins, RepliconRenetPlugins));
-        register_protocol(app);
+        apply_network_registry(app);
         app.insert_resource(BindAddr(self.bind_addr))
             .insert_resource(ServerProtocolId(protocol_id_for(&self.join_code)))
             .add_systems(Startup, setup_server)
@@ -285,6 +285,7 @@ fn receive_shield(
 #[allow(clippy::type_complexity)]
 fn receive_shoot(
     request: On<FromClient<ShootRequest>>,
+    ctx: Option<Res<crate::game::net::SpawnContext>>,
     mut commands: Commands,
     mut players: Query<
         (
@@ -303,6 +304,7 @@ fn receive_shoot(
         ),
     >,
 ) {
+    let ctx = resolve_spawn_context(ctx);
     if let Some(entity) = request.client_id.entity()
         && let Ok((pos, facing, mut cooldown, color, double, quad, zigzag)) =
             players.get_mut(entity)
@@ -310,6 +312,7 @@ fn receive_shoot(
         let mods = ShotMods::from_buffs(double.is_some(), quad.is_some(), zigzag.is_some());
         try_fire(
             &mut commands,
+            ctx,
             entity,
             *color,
             pos,

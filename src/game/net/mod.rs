@@ -15,27 +15,33 @@
 //! feature). The networking transport itself lives in [`client`]/[`server`],
 //! which are added by their respective binaries.
 
+pub mod input;
+pub mod policy;
 pub mod protocol;
+pub mod spawn;
 
 #[cfg(feature = "client")]
 pub mod client;
 #[cfg(feature = "server")]
 pub mod server;
 
+pub use input::{
+    InputBackend, LatestLocalInput, LocalPlayerInput, is_input_backend_offline,
+    is_input_backend_online,
+};
+pub use policy::{
+    ClientEvent, NetworkAppExt, NetworkEvent, NetworkRegistered, Replicated, ReplicatedComponent,
+    ServerEvent, apply_network_registry, init_network_registry,
+};
 pub use protocol::{
     ControllingClient, LastProcessedInput, MatchInfo, MatchPhase, NetPos, Owner, PlayerInput,
     ShieldRequest, ShootRequest, StartMatch, Winner, YouAreOwner,
 };
+pub use spawn::{SpawnCommandsExt, SpawnContext, resolve_spawn_context};
 
 use bevy::prelude::*;
-use bevy_replicon::prelude::*;
 
-use super::bot::Bot;
-use super::combat::{Dead, Health, SpawnInvulnerability};
-use super::pickup::PickupKind;
-use super::player::{Player, PlayerColor};
-use super::projectile::{Impact, Projectile, ShotColor};
-use super::shield::{ShieldCharge, Shielding};
+use super::projectile::Projectile;
 
 /// Default UDP port the server listens on and clients connect to.
 pub const DEFAULT_PORT: u16 = 5000;
@@ -82,34 +88,6 @@ pub enum NetRole {
     OnlineClient,
     /// Headless dedicated server: simulate and replicate, no rendering.
     Server,
-}
-
-/// Registers the replicated components and client messages that make up the
-/// protocol. Must be called *after* `RepliconPlugins` is added (it relies on the
-/// replication registry), so it lives inside the client/server net plugins.
-pub fn register_protocol(app: &mut App) {
-    app.replicate::<NetPos>()
-        .replicate::<Player>()
-        .replicate::<PlayerColor>()
-        .replicate::<Health>()
-        .replicate::<Bot>()
-        .replicate::<Projectile>()
-        .replicate::<ShotColor>()
-        .replicate::<Impact>()
-        .replicate::<Dead>()
-        .replicate::<Owner>()
-        .replicate::<MatchInfo>()
-        .replicate::<Shielding>()
-        .replicate::<ShieldCharge>()
-        .replicate::<SpawnInvulnerability>()
-        .replicate::<PickupKind>()
-        .replicate::<LastProcessedInput>()
-        .replicate::<ControllingClient>()
-        .add_client_event::<PlayerInput>(Channel::Unreliable)
-        .add_client_event::<ShootRequest>(Channel::Ordered)
-        .add_client_event::<ShieldRequest>(Channel::Ordered)
-        .add_client_event::<StartMatch>(Channel::Ordered)
-        .add_server_event::<YouAreOwner>(Channel::Ordered);
 }
 
 /// True when this instance owns the simulation: offline single-player or the

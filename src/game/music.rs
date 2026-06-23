@@ -5,6 +5,8 @@
 //! client-only, so the plugin and its system are gated on the `client` feature.
 
 #[cfg(feature = "client")]
+use super::net::SpawnCommandsExt;
+#[cfg(feature = "client")]
 use bevy::prelude::*;
 
 /// A background track, chosen per-map. Variants map to files in `assets/music/`
@@ -67,7 +69,7 @@ fn start_music(
     map: Res<super::map::CurrentMap>,
 ) {
     let song = map.0.song();
-    commands.spawn((
+    commands.spawn_ingame((
         BackgroundMusic,
         AudioPlayer::new(asset_server.load(song.asset_path())),
         PlaybackSettings {
@@ -75,6 +77,5 @@ fn start_music(
             volume: bevy::audio::Volume::Linear(0.5),
             ..default()
         },
-        super::InGame,
     ));
 }

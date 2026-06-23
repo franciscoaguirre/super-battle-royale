@@ -12,6 +12,8 @@ use bevy::prelude::*;
 
 use super::music::Song;
 #[cfg(feature = "client")]
+use super::net::SpawnCommandsExt;
+#[cfg(feature = "client")]
 use super::state::GameState;
 
 /// Side length, in world units, of a single map tile. All tile art is 64x64.
@@ -407,7 +409,6 @@ pub fn insert_map_resources(commands: &mut Commands, index: u8) {
 
 #[cfg(feature = "client")]
 fn spawn_map(mut commands: Commands, asset_server: Res<AssetServer>, map: Res<CurrentMap>) {
-    use super::InGame;
     let map = &map.0;
     let floor = asset_server.load("floor-tiles.png");
 
@@ -421,19 +422,18 @@ fn spawn_map(mut commands: Commands, asset_server: Res<AssetServer>, map: Res<Cu
             let center = map.cell_center(col, row);
 
             if tile.draws_floor() {
-                commands.spawn((
+                commands.spawn_ingame((
                     Sprite {
                         image: floor.clone(),
                         custom_size: Some(Vec2::splat(TILE_SIZE)),
                         ..default()
                     },
                     Transform::from_xyz(center.x, center.y, 0.0),
-                    InGame,
                 ));
             }
 
             if tile.is_wall() {
-                commands.spawn((
+                commands.spawn_ingame((
                     Wall,
                     Sprite {
                         image: asset_server.load(map.wall_sprite(col as i32, row as i32)),
@@ -441,12 +441,11 @@ fn spawn_map(mut commands: Commands, asset_server: Res<AssetServer>, map: Res<Cu
                         ..default()
                     },
                     Transform::from_xyz(center.x, center.y, 1.0),
-                    InGame,
                 ));
             }
 
             if let Some(sprite) = tile.object_sprite() {
-                commands.spawn((
+                commands.spawn_ingame((
                     MapObject,
                     Sprite {
                         image: asset_server.load(sprite),
@@ -454,7 +453,6 @@ fn spawn_map(mut commands: Commands, asset_server: Res<AssetServer>, map: Res<Cu
                         ..default()
                     },
                     Transform::from_xyz(center.x, center.y, 1.0),
-                    InGame,
                 ));
             }
         }

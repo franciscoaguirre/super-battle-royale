@@ -10,7 +10,9 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::bot::Bot;
-use super::net::{NetPos, is_authoritative};
+use super::net::{
+    NetPos, NetworkAppExt, Replicated, SpawnContext, is_authoritative, resolve_spawn_context,
+};
 use super::player::{PLAYER_SIZE, Player};
 use super::projectile::{
     ImpactKind, PROJECTILE_RADIUS, Projectile, ProjectileOwner, ProjectileVelocity, spawn_impact,
@@ -31,7 +33,7 @@ const SPAWN_INVULNERABILITY_DURATION: f32 = 2.0;
 const HIT_RADIUS: f32 = PLAYER_SIZE / 2.0 + PROJECTILE_RADIUS;
 
 /// A player's hit points. Replicated so every client can show damage cracks.
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Replicated)]
 pub struct Health {
     pub current: f32,
     pub max: f32,
@@ -49,12 +51,12 @@ impl Health {
 /// Replicated marker present while a player or bot is dead. Death is permanent
 /// for the round — a `Dead` combatant stays down (hidden, can't move or shoot)
 /// until the next level, when [`reset_combatants`] revives the persistent ones.
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, Replicated)]
 pub struct Dead;
 
 /// Replicated marker: the player or bot is invulnerable after spawning or
 /// respawning. Removed once `remaining` reaches zero.
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Replicated)]
 pub struct SpawnInvulnerability {
     pub remaining: f32,
     pub max: f32,
@@ -153,6 +155,10 @@ pub struct CombatPlugin;
 
 impl Plugin for CombatPlugin {
     fn build(&self, app: &mut App) {
+        app.register_networked::<Health>()
+            .register_networked::<Dead>()
+            .register_networked::<SpawnInvulnerability>();
+
         // Authoritative: give players health and resolve hits → death. Chained so
         // damage and death settle within a single frame. Death is permanent for
         // the round (no respawn); combatants are revived on the next level.
@@ -342,10 +348,12 @@ fn build_resolution(
 /// explicitly disjoint from the projectile query.
 #[allow(clippy::type_complexity)]
 fn apply_damage_and_blocks(
+    ctx: Option<Res<SpawnContext>>,
     mut commands: Commands,
     mut targets: Query<&mut Health, Without<Projectile>>,
     projectiles: Query<(Entity, &HitResolution), With<Projectile>>,
 ) {
+    let ctx = resolve_spawn_context(ctx);
     for (entity, resolution) in &projectiles {
         match resolution.kind {
             HitKind::Damage => {
@@ -355,12 +363,12 @@ fn apply_damage_and_blocks(
                         commands.entity(resolution.owner).insert(HealOnKill(1.0));
                     }
                     health.current -= resolution.damage;
-                    spawn_impact(&mut commands, ImpactKind::Object, resolution.hit_pos);
+                    spawn_impact(&mut commands, ctx, ImpactKind::Object, resolution.hit_pos);
                 }
                 commands.entity(entity).despawn();
             }
             HitKind::Block => {
-                spawn_impact(&mut commands, ImpactKind::Shield, resolution.hit_pos);
+                spawn_impact(&mut commands, ctx, ImpactKind::Shield, resolution.hit_pos);
                 commands.entity(entity).despawn();
             }
             HitKind::Parry => {
@@ -373,6 +381,7 @@ fn apply_damage_and_blocks(
 /// Reflects projectiles marked as parries by [`apply_projectile_hits`].
 #[allow(clippy::type_complexity)]
 fn apply_parry_reflections(
+    ctx: Option<Res<SpawnContext>>,
     mut commands: Commands,
     mut projectiles: Query<
         (
@@ -385,6 +394,7 @@ fn apply_parry_reflections(
         With<Projectile>,
     >,
 ) {
+    let ctx = resolve_spawn_context(ctx);
     for (entity, mut pos, mut owner, mut velocity, resolution) in &mut projectiles {
         if let HitKind::Parry = resolution.kind {
             reflect_projectile(
@@ -394,7 +404,7 @@ fn apply_parry_reflections(
                 resolution.target,
                 resolution.hit_pos,
             );
-            spawn_impact(&mut commands, ImpactKind::Parry, pos.0);
+            spawn_impact(&mut commands, ctx, ImpactKind::Parry, pos.0);
             commands.entity(entity).remove::<HitResolution>();
         }
     }

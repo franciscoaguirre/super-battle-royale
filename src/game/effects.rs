@@ -12,9 +12,8 @@ use bevy::post_process::effect_stack::ChromaticAberration;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-use super::InGame;
 use super::combat::Dead;
-use super::net::NetPos;
+use super::net::{NetPos, SpawnCommandsExt};
 use super::player::PlayerColor;
 use super::projectile::{Impact, ImpactKind, shot_glow};
 use super::state::GameState;
@@ -201,7 +200,7 @@ fn spawn_sparks(
         let angle = (i as f32 / count as f32) * std::f32::consts::TAU + seed;
         let dir = Vec2::new(angle.cos(), angle.sin());
         let jitter = (i as f32 * 1.6 + seed).sin() * 0.5 + 0.5;
-        commands.spawn((
+        commands.spawn_ingame((
             Spark {
                 velocity: dir * speed * (0.6 + 0.5 * jitter),
                 timer: Timer::from_seconds(SPARK_LIFETIME, TimerMode::Once),
@@ -214,13 +213,12 @@ fn spawn_sparks(
             },
             // Above the playfield — sparks fly over everything.
             Transform::from_xyz(origin.x, origin.y, 21.0),
-            InGame,
         ));
     }
 }
 
 fn spawn_shockwave(commands: &mut Commands, texture: &Handle<Image>, origin: Vec2, color: Color) {
-    commands.spawn((
+    commands.spawn_ingame((
         Shockwave {
             timer: Timer::from_seconds(SHOCKWAVE_LIFETIME, TimerMode::Once),
             color,
@@ -233,7 +231,6 @@ fn spawn_shockwave(commands: &mut Commands, texture: &Handle<Image>, origin: Vec
         },
         // On the ground (above floor/walls, beneath players).
         Transform::from_xyz(origin.x, origin.y, 2.0),
-        InGame,
     ));
 }
 

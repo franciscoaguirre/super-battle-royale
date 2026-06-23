@@ -16,14 +16,15 @@
 //! offline, on the host, and on every client. v1: only players collect pickups.
 
 use bevy::prelude::*;
-use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::combat::{
     DamageBoost, Dead, DoubleShot, Health, QuadShot, RapidFire, SpeedBoost, Zigzag,
 };
 use super::map::CurrentMap;
-use super::net::{NetPos, is_authoritative};
+use super::net::{
+    NetPos, NetworkAppExt, SpawnCommandsExt, SpawnContext, is_authoritative, resolve_spawn_context,
+};
 use super::player::{PLAYER_SIZE, Player};
 use super::projectile::{ImpactKind, spawn_impact};
 use super::state::GameState;
@@ -67,7 +68,18 @@ const KINDS: [PickupKind; 7] = [
 
 /// What a pickup grants. Doubles as the pickup's marker component (like
 /// `Impact(ImpactKind)`) and is replicated so clients draw the matching color.
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    Component,
+    Serialize,
+    Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    super::net::Replicated,
+)]
 pub enum PickupKind {
     #[default]
     Heal,
@@ -101,6 +113,8 @@ pub struct PickupPlugin;
 
 impl Plugin for PickupPlugin {
     fn build(&self, app: &mut App) {
+        app.register_networked::<PickupKind>();
+
         // Authoritative: build pads at match start; refill + collect each frame.
         app.add_systems(
             OnEnter(GameState::Playing),
@@ -126,11 +140,12 @@ impl Plugin for PickupPlugin {
 
 /// Builds a pad entity per `PickupSpawn` tile and seeds each with its first
 /// pickup. Parallels `spawn_bots`; runs only where the simulation is authoritative.
-fn build_pickup_pads(mut commands: Commands, map: Res<CurrentMap>) {
+fn build_pickup_pads(mut commands: Commands, map: Res<CurrentMap>, ctx: Option<Res<SpawnContext>>) {
+    let ctx = resolve_spawn_context(ctx);
     for (i, &pos) in map.0.pickup_points().iter().enumerate() {
         let len = KINDS.len();
         let pad = commands
-            .spawn((
+            .spawn_ingame((
                 Pad {
                     timer: Timer::from_seconds(PICKUP_RESPAWN_DELAY, TimerMode::Once),
                     occupied: true,
@@ -138,24 +153,31 @@ fn build_pickup_pads(mut commands: Commands, map: Res<CurrentMap>) {
                     cycle: (i + 1) % len,
                 },
                 NetPos(pos),
-                super::InGame,
             ))
             .id();
-        spawn_pickup(&mut commands, pad, pos, KINDS[i % len]);
+        spawn_pickup(&mut commands, ctx, pad, pos, KINDS[i % len]);
     }
 }
 
 /// Spawns one replicated pickup at `pos`, linked back to its `pad`.
-fn spawn_pickup(commands: &mut Commands, pad: Entity, pos: Vec2, kind: PickupKind) {
-    commands.spawn((kind, NetPos(pos), PadOf(pad), Replicated, super::InGame));
+fn spawn_pickup(
+    commands: &mut Commands,
+    ctx: SpawnContext,
+    pad: Entity,
+    pos: Vec2,
+    kind: PickupKind,
+) {
+    commands.spawn_pickup(ctx, (kind, NetPos(pos), PadOf(pad)));
 }
 
 /// Refills emptied pads once their respawn timer elapses, cycling the kind.
 fn respawn_pickups(
     time: Res<Time>,
+    ctx: Option<Res<SpawnContext>>,
     mut commands: Commands,
     mut pads: Query<(Entity, &NetPos, &mut Pad)>,
 ) {
+    let ctx = resolve_spawn_context(ctx);
     for (pad_entity, pos, mut pad) in &mut pads {
         if pad.occupied {
             continue;
@@ -164,7 +186,7 @@ fn respawn_pickups(
             let kind = KINDS[pad.cycle % KINDS.len()];
             pad.cycle = (pad.cycle + 1) % KINDS.len();
             pad.occupied = true;
-            spawn_pickup(&mut commands, pad_entity, pos.0, kind);
+            spawn_pickup(&mut commands, ctx, pad_entity, pos.0, kind);
         }
     }
 }
@@ -174,11 +196,13 @@ fn respawn_pickups(
 /// instantly regardless of system order).
 #[allow(clippy::type_complexity)]
 fn collect_pickups(
+    ctx: Option<Res<SpawnContext>>,
     mut commands: Commands,
     pickups: Query<(Entity, &NetPos, &PickupKind, &PadOf)>,
     mut players: Query<(Entity, &NetPos, &mut Health), (With<Player>, Without<Dead>)>,
     mut pads: Query<&mut Pad>,
 ) {
+    let ctx = resolve_spawn_context(ctx);
     let reach = PICKUP_RADIUS + PLAYER_SIZE / 2.0;
     for (pickup, pickup_pos, kind, pad_of) in &pickups {
         for (player, player_pos, mut health) in &mut players {
@@ -193,7 +217,7 @@ fn collect_pickups(
                 }
                 other => grant_buff(&mut commands, player, other),
             }
-            spawn_impact(&mut commands, ImpactKind::Pickup, pickup_pos.0);
+            spawn_impact(&mut commands, ctx, ImpactKind::Pickup, pickup_pos.0);
             commands.entity(pickup).try_despawn();
             if let Ok(mut pad) = pads.get_mut(pad_of.0) {
                 pad.occupied = false;
@@ -337,7 +361,7 @@ fn spawn_pad_decals(mut commands: Commands, art: Option<Res<PickupArt>>, map: Re
         return;
     };
     for &pos in map.0.pickup_points() {
-        commands.spawn((
+        commands.spawn_ingame((
             Sprite {
                 image: art.halo.clone(),
                 color: PAD_DECAL_COLOR,
@@ -346,7 +370,6 @@ fn spawn_pad_decals(mut commands: Commands, art: Option<Res<PickupArt>>, map: Re
             },
             // On the ground (above floor/walls, beneath players), like shockwaves.
             Transform::from_xyz(pos.x, pos.y, 2.0),
-            super::InGame,
         ));
     }
 }
