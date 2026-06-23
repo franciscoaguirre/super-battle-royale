@@ -4,9 +4,9 @@ use bevy::post_process::bloom::{Bloom, BloomCompositeMode, BloomPrefilter};
 use bevy::post_process::effect_stack::ChromaticAberration;
 use bevy::prelude::*;
 
-use super::InGame;
 use super::crt::Crt;
 use super::map::ArenaBounds;
+use super::net::SpawnCommandsExt;
 
 pub struct CameraPlugin;
 
@@ -19,7 +19,7 @@ impl Plugin for CameraPlugin {
 fn spawn_camera(mut commands: Commands, bounds: Res<ArenaBounds>) {
     // Fixed camera that shows the entire arena (plus a small margin) regardless
     // of window size.
-    commands.spawn((
+    commands.spawn_ingame((
         Camera2d,
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical {
@@ -52,6 +52,5 @@ fn spawn_camera(mut commands: Commands, bounds: Res<ArenaBounds>) {
         },
         // Subtle CRT post-process (scanlines + curvature + vignette).
         Crt,
-        InGame,
     ));
 }

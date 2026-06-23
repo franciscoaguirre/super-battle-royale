@@ -6,8 +6,19 @@ use super::bot::Bot;
 #[cfg(feature = "client")]
 use super::combat::Health;
 use super::combat::{Dead, SpeedBoost, give_spawn_invulnerability};
+#[cfg(feature = "client")]
+use super::combat::{DoubleShot, QuadShot, SpawnInvulnerability, Zigzag};
 use super::map::{ArenaBounds, CurrentMap, TileMap};
-use super::net::{NetPos, is_authoritative, is_offline};
+#[cfg(feature = "client")]
+use super::net::input::sample_local_input;
+#[cfg(feature = "client")]
+use super::net::{LatestLocalInput, is_input_backend_offline};
+use super::net::{
+    NetPos, NetworkAppExt, Replicated, SpawnCommandsExt, SpawnContext, is_authoritative,
+    is_offline, resolve_spawn_context,
+};
+#[cfg(feature = "client")]
+use super::projectile::{Facing, FireCooldown, ShotMods, try_fire};
 #[cfg(feature = "client")]
 use super::shield::ShieldState;
 use super::shield::{ShieldTickSet, insert_shield};
@@ -43,7 +54,7 @@ struct HasHealthCracks;
 struct HealthCrack(u8);
 
 /// Marker for a player avatar. Replicated so clients learn about every player.
-#[derive(Component, Serialize, Deserialize, Debug, Clone, Copy, Default)]
+#[derive(Component, Serialize, Deserialize, Debug, Clone, Copy, Default, Replicated)]
 pub struct Player;
 
 /// The desired movement direction for a player this frame. Set locally offline,
@@ -54,7 +65,9 @@ pub struct PlayerIntent(pub Vec2);
 
 /// The visual color of a player. Replicated so every client draws each player
 /// with the right sprite.
-#[derive(Component, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Component, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Replicated,
+)]
 pub enum PlayerColor {
     Red,
     #[default]
@@ -102,7 +115,13 @@ pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SelectedColor>()
+        app.register_networked::<Player>()
+            .register_networked::<PlayerColor>()
+            .register_networked::<super::net::PlayerInput>()
+            .register_networked::<super::net::Owner>()
+            .register_networked::<super::net::ControllingClient>()
+            .register_networked::<super::net::LastProcessedInput>()
+            .init_resource::<SelectedColor>()
             // Offline spawns the single local player; online clients receive
             // players via replication, the server via [`on_client_authorized`].
             .add_systems(OnEnter(GameState::Playing), spawn_player.run_if(is_offline))
@@ -121,12 +140,11 @@ impl Plugin for PlayerPlugin {
         app.add_systems(
             Update,
             (
-                read_local_input
+                sample_local_input.run_if(in_state(GameState::Playing)),
+                offline_input_router
                     .run_if(in_state(GameState::Playing))
-                    .run_if(is_offline),
-                read_local_shield
-                    .run_if(in_state(GameState::Playing))
-                    .run_if(is_offline)
+                    .run_if(is_input_backend_offline)
+                    .after(super::net::input::sample_local_input)
                     .before(ShieldTickSet),
                 attach_player_sprite.run_if(in_state(GameState::Playing)),
                 attach_health_cracks.run_if(in_state(GameState::Playing)),
@@ -138,16 +156,19 @@ impl Plugin for PlayerPlugin {
 
 /// Spawns the local player for offline single-player. The sprite is attached by
 /// [`attach_player_sprite`], so this only sets up the logical entity.
-fn spawn_player(mut commands: Commands, selected: Res<SelectedColor>, map: Res<CurrentMap>) {
+fn spawn_player(
+    mut commands: Commands,
+    selected: Res<SelectedColor>,
+    map: Res<CurrentMap>,
+    ctx: Option<Res<SpawnContext>>,
+) {
+    let ctx = resolve_spawn_context(ctx);
     let spawn = map.0.spawn_points().first().copied().unwrap_or(Vec2::ZERO);
     let entity = commands
-        .spawn((
-            Player,
-            selected.0,
-            NetPos(spawn),
-            PlayerIntent::default(),
-            super::InGame,
-        ))
+        .spawn_player(
+            ctx,
+            (Player, selected.0, NetPos(spawn), PlayerIntent::default()),
+        )
         .id();
     insert_shield(&mut commands, entity);
     give_spawn_invulnerability(&mut commands, entity);
@@ -204,50 +225,69 @@ pub(crate) fn apply_player_intent(
     }
 }
 
-/// Builds a normalized movement vector from the WASD / arrow keys.
+/// Offline router: applies the single sampled [`LocalPlayerInput`] directly to the
+/// local player's intent, facing, shield request, and (if allowed) fires a shot.
+/// This is the offline backend counterpart to the online client's event sender.
 #[cfg(feature = "client")]
-pub(crate) fn input_direction(input: &ButtonInput<KeyCode>) -> Vec2 {
-    let mut direction = Vec2::ZERO;
-    if input.pressed(KeyCode::KeyW) || input.pressed(KeyCode::ArrowUp) {
-        direction.y += 1.0;
-    }
-    if input.pressed(KeyCode::KeyS) || input.pressed(KeyCode::ArrowDown) {
-        direction.y -= 1.0;
-    }
-    if input.pressed(KeyCode::KeyA) || input.pressed(KeyCode::ArrowLeft) {
-        direction.x -= 1.0;
-    }
-    if input.pressed(KeyCode::KeyD) || input.pressed(KeyCode::ArrowRight) {
-        direction.x += 1.0;
-    }
-    if direction != Vec2::ZERO {
-        direction.normalize()
-    } else {
-        direction
-    }
-}
-
-/// Offline: feed local keyboard input into the (single) player's intent.
-#[cfg(feature = "client")]
-fn read_local_input(
-    input: Res<ButtonInput<KeyCode>>,
-    mut query: Query<&mut PlayerIntent, With<Player>>,
+#[allow(clippy::type_complexity)]
+fn offline_input_router(
+    ctx: Option<Res<SpawnContext>>,
+    mut commands: Commands,
+    input: Res<LatestLocalInput>,
+    mut query: Query<
+        (
+            Entity,
+            &NetPos,
+            &PlayerColor,
+            &mut PlayerIntent,
+            &mut Facing,
+            &mut FireCooldown,
+            &mut ShieldState,
+            Has<super::shield::Shielding>,
+            Has<SpawnInvulnerability>,
+            Option<&DoubleShot>,
+            Option<&QuadShot>,
+            Option<&Zigzag>,
+        ),
+        (With<Player>, Without<Dead>),
+    >,
 ) {
-    let dir = input_direction(&input);
-    for mut intent in &mut query {
-        intent.0 = dir;
-    }
-}
-
-/// Offline: set the local player's shield request from Left/Right Shift.
-#[cfg(feature = "client")]
-fn read_local_shield(
-    input: Res<ButtonInput<KeyCode>>,
-    mut query: Query<&mut ShieldState, With<Player>>,
-) {
-    let pressed = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
-    for mut shield in &mut query {
-        shield.requested = pressed;
+    let ctx = resolve_spawn_context(ctx);
+    for (
+        entity,
+        pos,
+        color,
+        mut intent,
+        mut facing,
+        mut cooldown,
+        mut shield,
+        shielding,
+        invulnerable,
+        double,
+        quad,
+        zigzag,
+    ) in &mut query
+    {
+        intent.0 = input.0.dir;
+        if input.0.dir != Vec2::ZERO {
+            facing.0 = input.0.dir.normalize_or_zero();
+        }
+        if let Some(pressed) = input.0.shield_change {
+            shield.requested = pressed;
+        }
+        if input.0.shoot && !shielding && !invulnerable {
+            let mods = ShotMods::from_buffs(double.is_some(), quad.is_some(), zigzag.is_some());
+            try_fire(
+                &mut commands,
+                ctx,
+                entity,
+                *color,
+                pos,
+                &facing,
+                &mut cooldown,
+                mods,
+            );
+        }
     }
 }
 

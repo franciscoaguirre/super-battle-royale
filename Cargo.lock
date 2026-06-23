@@ -4702,6 +4702,16 @@ dependencies = [
  "bevy_replicon",
  "bevy_replicon_renet",
  "serde",
+ "super-battle-royale-macros",
+]
+
+[[package]]
+name = "super-battle-royale-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

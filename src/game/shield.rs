@@ -15,10 +15,10 @@ use bevy::asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use super::combat::Dead;
-use super::net::{NetPos, is_authoritative};
-use super::player::PLAYER_SIZE;
 #[cfg(feature = "client")]
 use super::combat::SpawnInvulnerability;
+use super::net::{NetPos, NetworkAppExt, Replicated, is_authoritative};
+use super::player::PLAYER_SIZE;
 #[cfg(feature = "client")]
 use super::player::{Player, PlayerColor};
 use super::projectile::{PROJECTILE_RADIUS, ProjectileOwner, ProjectileVelocity};
@@ -39,11 +39,11 @@ const COOLDOWN_DURATION: f32 = 3.0;
 const REFLECT_PUSH: f32 = 2.0;
 
 /// Replicated marker: the entity currently has its shield raised.
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, Replicated)]
 pub struct Shielding;
 
 /// Replicated shield charge (0.0 = empty, 1.0 = full). Used by client visuals.
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, Replicated)]
 pub struct ShieldCharge(pub f32);
 
 /// Server/sim-only state machine for a shield.
@@ -113,6 +113,10 @@ pub struct ShieldPlugin;
 
 impl Plugin for ShieldPlugin {
     fn build(&self, app: &mut App) {
+        app.register_networked::<Shielding>()
+            .register_networked::<ShieldCharge>()
+            .register_networked::<super::net::ShieldRequest>();
+
         app.add_systems(
             Update,
             tick_shields

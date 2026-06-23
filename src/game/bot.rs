@@ -1,10 +1,11 @@
 use bevy::prelude::*;
-use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::combat::{Dead, SpawnInvulnerability, give_spawn_invulnerability};
 use super::map::{ArenaBounds, CurrentMap};
-use super::net::{NetPos, is_authoritative};
+use super::net::{
+    NetPos, NetworkAppExt, SpawnCommandsExt, SpawnContext, is_authoritative, resolve_spawn_context,
+};
 use super::player::PlayerColor;
 use super::projectile::{
     Facing, FireCooldown, Projectile, ProjectileOwner, ShotMods, tick_cooldowns, try_fire,
@@ -28,7 +29,9 @@ const BOT_SHIELD_RANGE: f32 = 120.0;
 
 /// Marker for an bot. Replicated so clients know which entities to draw as
 /// bots; the AI state and intent stay server-side.
-#[derive(Component, Serialize, Deserialize, Debug, Clone, Copy, Default)]
+#[derive(
+    Component, Serialize, Deserialize, Debug, Clone, Copy, Default, super::net::Replicated,
+)]
 pub struct Bot;
 
 /// Server-only AI state: which combatant (player or other bot) the bot is
@@ -47,6 +50,8 @@ pub struct BotPlugin;
 
 impl Plugin for BotPlugin {
     fn build(&self, app: &mut App) {
+        app.register_networked::<Bot>();
+
         // Enemies are simulated wherever we're authoritative (server or offline).
         app.add_systems(
             OnEnter(GameState::Playing),
@@ -77,9 +82,15 @@ impl Plugin for BotPlugin {
 
 /// Spawns the authoritative bot entities. `Replicated` is inert offline (no
 /// server running) and drives replication on the dedicated server.
-fn spawn_bots(mut commands: Commands, map: Res<CurrentMap>, config: Res<MatchConfig>) {
+fn spawn_bots(
+    mut commands: Commands,
+    map: Res<CurrentMap>,
+    config: Res<MatchConfig>,
+    ctx: Option<Res<SpawnContext>>,
+) {
     let spawns = map.0.spawn_points();
     let count = config.bot_count as usize;
+    let ctx = resolve_spawn_context(ctx);
 
     for i in 0..count {
         let pos = if spawns.is_empty() {
@@ -90,18 +101,19 @@ fn spawn_bots(mut commands: Commands, map: Res<CurrentMap>, config: Res<MatchCon
         };
 
         let entity = commands
-            .spawn((
-                Bot,
-                BotAI {
-                    target: None,
-                    wander: Vec2::new(0.6, 0.8).normalize(),
-                },
-                BotIntent::default(),
-                PlayerColor::Red,
-                NetPos(pos),
-                Replicated,
-                super::InGame,
-            ))
+            .spawn_bot(
+                ctx,
+                (
+                    Bot,
+                    BotAI {
+                        target: None,
+                        wander: Vec2::new(0.6, 0.8).normalize(),
+                    },
+                    BotIntent::default(),
+                    PlayerColor::Red,
+                    NetPos(pos),
+                ),
+            )
             .id();
         insert_shield(&mut commands, entity);
         give_spawn_invulnerability(&mut commands, entity);
@@ -243,6 +255,7 @@ fn update_bot_facing(mut query: Query<(&BotIntent, &mut Facing), With<Bot>>) {
 /// at it. Respects the same fire cooldown as players.
 #[allow(clippy::type_complexity)]
 fn bot_shoot(
+    ctx: Option<Res<SpawnContext>>,
     mut commands: Commands,
     bots: Query<
         (
@@ -262,6 +275,7 @@ fn bot_shoot(
     >,
     targets: Query<&NetPos, (Or<(With<super::player::Player>, With<Bot>)>, Without<Dead>)>,
 ) {
+    let ctx = resolve_spawn_context(ctx);
     for (entity, pos, facing, mut cooldown, color, ai) in bots {
         let Some(target) = ai.target else {
             continue;
@@ -283,6 +297,7 @@ fn bot_shoot(
         // Bots don't collect power-ups in v1, so they always fire a single shot.
         try_fire(
             &mut commands,
+            ctx,
             entity,
             *color,
             pos,

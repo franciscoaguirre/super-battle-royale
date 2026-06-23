@@ -27,6 +27,7 @@ pub mod ping;
 
 use bevy::prelude::*;
 
+use net::{InputBackend, NetworkAppExt, SpawnContext, init_network_registry};
 use state::{GameState, MatchConfig};
 
 /// Top-level plugin that wires up the entire game.
@@ -41,7 +42,17 @@ pub struct GamePlugin;
 
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
-        app.init_state::<GameState>()
+        init_network_registry(app);
+        app.register_networked::<net::NetPos>()
+            .init_state::<GameState>()
+            .add_systems(
+                Startup,
+                init_spawn_context.run_if(resource_exists::<net::NetRole>),
+            )
+            .add_systems(
+                Startup,
+                init_input_backend.run_if(resource_exists::<net::NetRole>),
+            )
             .init_resource::<MatchConfig>()
             // Run the fixed simulation step (player movement + prediction) at the
             // server's 60 Hz loop rate, so client replay matches server steps.
@@ -71,6 +82,7 @@ impl Plugin for GamePlugin {
             music::MusicPlugin,
             ping::PingPlugin,
         ))
+        .init_resource::<net::LatestLocalInput>()
         .add_systems(PostUpdate, net::sync_netpos_to_transform);
     }
 }
@@ -84,4 +96,17 @@ fn cleanup_ingame(mut commands: Commands, query: Query<Entity, With<InGame>>) {
     for entity in &query {
         commands.entity(entity).despawn();
     }
+}
+
+/// Mirrors the startup [`NetRole`] into a [`SpawnContext`] resource so gameplay
+/// spawn systems can decide replication/`InGame` policy without querying the role
+/// directly. Runs only when a role has been inserted by the binary.
+fn init_spawn_context(mut commands: Commands, role: Res<net::NetRole>) {
+    commands.insert_resource(SpawnContext { role: *role });
+}
+
+/// Mirrors the startup [`NetRole`] into an [`InputBackend`] resource so input
+/// systems can route local player input without knowing the exact role.
+fn init_input_backend(mut commands: Commands, role: Res<net::NetRole>) {
+    commands.insert_resource(InputBackend::from_role(*role));
 }

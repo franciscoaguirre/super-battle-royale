@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use super::InGame;
+use super::net::SpawnCommandsExt;
 use super::player::Player;
 
 /// The interchangeable footstep clips, relative to the `assets/` dir. One is
@@ -121,13 +121,12 @@ fn play_footsteps(
     state.rng ^= time.elapsed().as_nanos() as u64;
     let index = state.pick_index();
 
-    commands.spawn((
+    commands.spawn_ingame((
         AudioPlayer::new(asset_server.load(STEP_PATHS[index])),
         PlaybackSettings {
             mode: bevy::audio::PlaybackMode::Despawn,
             volume: bevy::audio::Volume::Linear(STEP_VOLUME),
             ..default()
         },
-        InGame,
     ));
 }

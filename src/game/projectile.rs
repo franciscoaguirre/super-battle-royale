@@ -13,20 +13,16 @@
 //! the client.
 
 use bevy::prelude::*;
-use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::bot::{Bot, BotIntent};
 use super::combat::RapidFire;
 use super::map::{ArenaBounds, CurrentMap};
-use super::net::{NetPos, is_authoritative};
+use super::net::{
+    NetPos, NetworkAppExt, SpawnCommandsExt, SpawnContext, is_authoritative, resolve_spawn_context,
+};
 use super::player::{Player, PlayerColor, PlayerIntent};
 use super::state::GameState;
-
-#[cfg(feature = "client")]
-use super::combat::{Dead, DoubleShot, QuadShot, SpawnInvulnerability, Zigzag};
-#[cfg(feature = "client")]
-use super::net::is_offline;
 
 /// Constant horizontal speed of a shot, in world units per second.
 const PROJECTILE_SPEED: f32 = 360.0;
@@ -69,11 +65,15 @@ const HIT_OBJECT_SOUND: &str = "soundfx/sfx_hit_object.mp3";
 const SFX_VOLUME: f32 = 0.6;
 
 /// Replicated marker for a shot.
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
+#[derive(
+    Component, Serialize, Deserialize, Clone, Copy, Debug, Default, super::net::Replicated,
+)]
 pub struct Projectile;
 
 /// The firing player's color, replicated so the shot and its trail glow to match.
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
+#[derive(
+    Component, Serialize, Deserialize, Clone, Copy, Debug, Default, super::net::Replicated,
+)]
 pub struct ShotColor(pub PlayerColor);
 
 /// Server/sim-only velocity of a shot. Not replicated (clients only need the
@@ -177,7 +177,9 @@ pub enum ImpactKind {
 /// matching sound when one appears; the authoritative side cleans it up. Using a
 /// replicated entity (rather than a one-off network message) makes the audio cue
 /// fire identically offline, on the server, and on connected clients.
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
+#[derive(
+    Component, Serialize, Deserialize, Clone, Copy, Debug, Default, super::net::Replicated,
+)]
 pub struct Impact(pub ImpactKind);
 
 /// Server/sim-only lifetime for an [`Impact`] marker.
@@ -188,6 +190,11 @@ pub struct ProjectilePlugin;
 
 impl Plugin for ProjectilePlugin {
     fn build(&self, app: &mut App) {
+        app.register_networked::<Projectile>()
+            .register_networked::<ShotColor>()
+            .register_networked::<Impact>()
+            .register_networked::<super::net::ShootRequest>();
+
         // Firing and motion run wherever we're authoritative (server + offline).
         app.add_systems(
             Update,
@@ -209,7 +216,6 @@ impl Plugin for ProjectilePlugin {
             app.add_systems(
                 Update,
                 (
-                    offline_shoot.run_if(is_offline),
                     attach_projectile_sprite,
                     play_shoot_sound,
                     play_impact_sounds,
@@ -288,6 +294,7 @@ fn simulate_projectiles(
     time: Res<Time>,
     bounds: Res<ArenaBounds>,
     map: Res<CurrentMap>,
+    ctx: Option<Res<SpawnContext>>,
     mut commands: Commands,
     mut query: Query<
         (
@@ -300,6 +307,7 @@ fn simulate_projectiles(
         With<Projectile>,
     >,
 ) {
+    let ctx = resolve_spawn_context(ctx);
     let dt = time.delta_secs();
     for (entity, mut pos, mut traveled, velocity, zigzag) in &mut query {
         // A zig-zagging shot rotates its (constant) base velocity by an
@@ -321,7 +329,7 @@ fn simulate_projectiles(
             p.x < bounds.min.x || p.x > bounds.max.x || p.y < bounds.min.y || p.y > bounds.max.y;
         let hit_wall = map.0.circle_intersects_wall(p, PROJECTILE_RADIUS);
         if hit_wall {
-            spawn_impact(&mut commands, ImpactKind::Ground, pos.0);
+            spawn_impact(&mut commands, ctx, ImpactKind::Ground, pos.0);
             commands.entity(entity).despawn();
         } else if out_of_bounds || traveled.0 >= MAX_RANGE {
             // Out of bounds or spent: just fizzle out, no impact cue.
@@ -334,9 +342,11 @@ fn simulate_projectiles(
 /// are destroyed (and a clash impact pops). Same-owner shots pass through, so a
 /// player's own multi-shot/quad burst never cancels itself at the spawn point.
 fn collide_projectiles(
+    ctx: Option<Res<SpawnContext>>,
     mut commands: Commands,
     projectiles: Query<(Entity, &NetPos, &ProjectileOwner), With<Projectile>>,
 ) {
+    let ctx = resolve_spawn_context(ctx);
     const CLASH_DIST: f32 = 2.0 * PROJECTILE_RADIUS;
     let shots: Vec<(Entity, Vec2, Entity)> = projectiles
         .iter()
@@ -353,7 +363,12 @@ fn collide_projectiles(
             }
             destroyed.insert(e_a);
             destroyed.insert(e_b);
-            spawn_impact(&mut commands, ImpactKind::Object, pos_a.midpoint(pos_b));
+            spawn_impact(
+                &mut commands,
+                ctx,
+                ImpactKind::Object,
+                pos_a.midpoint(pos_b),
+            );
         }
     }
     for entity in destroyed {
@@ -363,13 +378,20 @@ fn collide_projectiles(
 
 /// Spawns a replicated impact marker (carrying where it happened) so clients can
 /// play the matching sound and spawn visual effects there.
-pub(crate) fn spawn_impact(commands: &mut Commands, kind: ImpactKind, position: Vec2) {
-    commands.spawn((
-        Impact(kind),
-        NetPos(position),
-        ImpactLifetime(Timer::from_seconds(IMPACT_LIFETIME, TimerMode::Once)),
-        Replicated,
-    ));
+pub(crate) fn spawn_impact(
+    commands: &mut Commands,
+    ctx: SpawnContext,
+    kind: ImpactKind,
+    position: Vec2,
+) {
+    commands.spawn_impact(
+        ctx,
+        (
+            Impact(kind),
+            NetPos(position),
+            ImpactLifetime(Timer::from_seconds(IMPACT_LIFETIME, TimerMode::Once)),
+        ),
+    );
 }
 
 /// Cleans up impact markers once they've had time to replicate to clients.
@@ -391,6 +413,7 @@ fn tick_impacts(
 /// burst, so multi-shot adds bullets without raising the fire rate.
 pub(crate) fn try_fire(
     commands: &mut Commands,
+    ctx: SpawnContext,
     owner: Entity,
     color: PlayerColor,
     origin: &NetPos,
@@ -407,23 +430,24 @@ pub(crate) fn try_fire(
     match mods.directions {
         // Forward + backward.
         2 => {
-            spawn_projectile(commands, owner, color, origin.0, forward, mods.zigzag);
-            spawn_projectile(commands, owner, color, origin.0, -forward, mods.zigzag);
+            spawn_projectile(commands, ctx, owner, color, origin.0, forward, mods.zigzag);
+            spawn_projectile(commands, ctx, owner, color, origin.0, -forward, mods.zigzag);
         }
         // A four-way cross around the facing direction.
         4 => {
             let side = forward.perp();
             for dir in [forward, side, -forward, -side] {
-                spawn_projectile(commands, owner, color, origin.0, dir, mods.zigzag);
+                spawn_projectile(commands, ctx, owner, color, origin.0, dir, mods.zigzag);
             }
         }
         // A single straight shot.
-        _ => spawn_projectile(commands, owner, color, origin.0, forward, mods.zigzag),
+        _ => spawn_projectile(commands, ctx, owner, color, origin.0, forward, mods.zigzag),
     }
 }
 
 fn spawn_projectile(
     commands: &mut Commands,
+    ctx: SpawnContext,
     owner: Entity,
     color: PlayerColor,
     origin: Vec2,
@@ -431,67 +455,24 @@ fn spawn_projectile(
     zigzag: bool,
 ) {
     let dir = direction.normalize_or_zero();
-    let mut shot = commands.spawn((
-        Projectile,
-        ProjectileOwner(owner),
-        ShotColor(color),
-        NetPos(origin),
-        DistanceTraveled(0.0),
-        ProjectileVelocity {
-            horizontal: dir * PROJECTILE_SPEED,
-        },
-        Replicated,
-        // Authoritative-side tag so leftover in-flight shots are cleared on a map
-        // switch. Clients render the replicated shot and let replicon despawn it.
-        super::InGame,
-    ));
+    let mut shot = commands.spawn_projectile(
+        ctx,
+        (
+            Projectile,
+            ProjectileOwner(owner),
+            ShotColor(color),
+            NetPos(origin),
+            DistanceTraveled(0.0),
+            ProjectileVelocity {
+                horizontal: dir * PROJECTILE_SPEED,
+            },
+        ),
+    );
     if zigzag {
         // Seed the weave phase from the launch angle so a multi-shot burst fans out.
         shot.insert(ZigzagMotion {
             elapsed: dir.to_angle(),
         });
-    }
-}
-
-/// Offline single-player: fire the local player on Space.
-#[cfg(feature = "client")]
-#[allow(clippy::type_complexity)]
-fn offline_shoot(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut commands: Commands,
-    mut players: Query<
-        (
-            Entity,
-            &NetPos,
-            &Facing,
-            &mut FireCooldown,
-            &PlayerColor,
-            Option<&DoubleShot>,
-            Option<&QuadShot>,
-            Option<&Zigzag>,
-        ),
-        (
-            With<Player>,
-            Without<Dead>,
-            Without<super::shield::Shielding>,
-            Without<SpawnInvulnerability>,
-        ),
-    >,
-) {
-    if !keys.just_pressed(KeyCode::Space) {
-        return;
-    }
-    for (entity, pos, facing, mut cooldown, color, double, quad, zigzag) in &mut players {
-        let mods = ShotMods::from_buffs(double.is_some(), quad.is_some(), zigzag.is_some());
-        try_fire(
-            &mut commands,
-            entity,
-            *color,
-            pos,
-            facing,
-            &mut cooldown,
-            mods,
-        );
     }
 }
 
@@ -546,14 +527,13 @@ fn render_projectiles(
 /// Spawns a one-shot, non-spatial sound that despawns when it finishes.
 #[cfg(feature = "client")]
 fn play_sound(commands: &mut Commands, asset_server: &AssetServer, path: &'static str) {
-    commands.spawn((
+    commands.spawn_ingame((
         AudioPlayer::new(asset_server.load(path)),
         PlaybackSettings {
             mode: bevy::audio::PlaybackMode::Despawn,
             volume: bevy::audio::Volume::Linear(SFX_VOLUME),
             ..default()
         },
-        super::InGame,
     ));
 }
 
@@ -597,7 +577,7 @@ fn spawn_projectile_trail(
 ) {
     for (pos, color) in &projectiles {
         let glow = shot_glow(color.0);
-        commands.spawn((
+        commands.spawn_ingame((
             TrailSegment {
                 timer: Timer::from_seconds(TRAIL_LIFETIME, TimerMode::Once),
                 glow,
@@ -609,7 +589,6 @@ fn spawn_projectile_trail(
             },
             // Just behind the shot (z 19) but still above players.
             Transform::from_xyz(pos.0.x, pos.0.y, 19.0),
-            super::InGame,
         ));
     }
 }
@@ -638,6 +617,7 @@ fn fade_trail(
 mod tests {
     use super::*;
     use crate::game::map::TileMap;
+    use crate::game::net::{NetRole, SpawnContext};
     use std::time::Duration;
 
     /// Fires once with `directions` fire-pattern and returns how many projectiles
@@ -658,6 +638,9 @@ mod tests {
                 if let Ok((pos, facing, mut cooldown)) = shooter.get_mut(owner) {
                     try_fire(
                         &mut commands,
+                        SpawnContext {
+                            role: NetRole::Offline,
+                        },
                         owner,
                         PlayerColor::Blue,
                         pos,
