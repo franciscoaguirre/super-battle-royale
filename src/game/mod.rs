@@ -25,21 +25,33 @@ pub mod lobby;
 #[cfg(feature = "client")]
 pub mod ping;
 
+use std::marker::PhantomData;
+
 use bevy::prelude::*;
 
+use net::NetworkBackend;
 use state::{GameState, MatchConfig};
 
 /// Top-level plugin that wires up the entire game.
 ///
-/// This is shared by both binaries. Simulation plugins (`bot`, `map`,
-/// `player`) compile everywhere; the simulation runs only where this instance is
-/// authoritative (see [`net::is_authoritative`]). Rendering/audio plugins are
-/// added only in the client build. The networking transport itself
-/// ([`net::client`]/[`net::server`]) is added by each binary, since it depends on
-/// the chosen [`net::NetRole`].
-pub struct GamePlugin;
+/// This is shared by both binaries. Simulation plugins (`bot`, `map`, `player`)
+/// compile everywhere; the simulation runs only where this instance is
+/// authoritative (see [`NetworkBackend::IS_AUTHORITATIVE`]). Rendering/audio
+/// plugins are added only in the client build. The networking transport itself
+/// ([`net::client`]/[`net::server`]) is added by each binary.
+pub struct GamePlugin<B: NetworkBackend> {
+    _backend: PhantomData<B>,
+}
 
-impl Plugin for GamePlugin {
+impl<B: NetworkBackend> GamePlugin<B> {
+    pub fn new() -> Self {
+        Self {
+            _backend: PhantomData,
+        }
+    }
+}
+
+impl<B: NetworkBackend> Plugin for GamePlugin<B> {
     fn build(&self, app: &mut App) {
         app.init_state::<GameState>()
             .init_resource::<MatchConfig>()
@@ -47,14 +59,14 @@ impl Plugin for GamePlugin {
             // server's 60 Hz loop rate, so client replay matches server steps.
             .insert_resource(Time::<Fixed>::from_hz(60.0))
             .add_plugins((
-                combat::CombatPlugin,
-                bot::BotPlugin,
+                combat::CombatPlugin::<B>::new(),
+                bot::BotPlugin::<B>::new(),
                 map::MapPlugin,
-                match_flow::MatchFlowPlugin,
-                pickup::PickupPlugin,
-                player::PlayerPlugin,
-                projectile::ProjectilePlugin,
-                shield::ShieldPlugin,
+                match_flow::MatchFlowPlugin::<B>::new(),
+                pickup::PickupPlugin::<B>::new(),
+                player::PlayerPlugin::<B>::new(),
+                projectile::ProjectilePlugin::<B>::new(),
+                shield::ShieldPlugin::<B>::new(),
             ))
             // Cleanup runs when LEAVING the GameOver announcement (the map-switch
             // point), not on leaving Playing — so the scene stays frozen and
@@ -66,12 +78,12 @@ impl Plugin for GamePlugin {
             camera::CameraPlugin,
             crt::CrtPlugin,
             effects::EffectsPlugin,
-            footsteps::FootstepsPlugin,
-            lobby::LobbyPlugin,
+            footsteps::FootstepsPlugin::<B>::new(),
+            lobby::LobbyPlugin::<B>::new(),
             music::MusicPlugin,
-            ping::PingPlugin,
+            ping::PingPlugin::<B>::new(),
         ))
-        .add_systems(PostUpdate, net::sync_netpos_to_transform);
+        .add_systems(PostUpdate, net::sync_netpos_to_transform::<B>);
     }
 }
 

@@ -1,20 +1,22 @@
 //! Multiplayer networking.
 //!
-//! The game runs in one of three [`NetRole`]s, chosen at startup by the binary
+//! The game is generic over a [`NetworkBackend`] chosen at startup by the binary
 //! that launched it:
 //!
-//! - [`NetRole::Offline`] — the windowed client with no server: it simulates and
+//! - [`OfflineBackend`] — the windowed client with no server: it simulates and
 //!   renders locally, exactly like the original single-player game.
-//! - [`NetRole::OnlineClient`] — the windowed client connected to a server: it
-//!   renders and sends input, but runs no simulation (the server is authority).
-//! - [`NetRole::Server`] — the headless dedicated server: it simulates and
+//! - [`ClientBackend`] — the windowed client connected to a server: it renders
+//!   and sends input, but runs no simulation (the server is authority).
+//! - [`ServerBackend`] — the headless dedicated server: it simulates and
 //!   replicates, but never renders.
 //!
-//! Simulation systems are gated on [`is_authoritative`] (offline + server) and
-//! rendering systems are compiled only into the client binary (the `client`
-//! feature). The networking transport itself lives in [`client`]/[`server`],
+//! Gameplay plugins are monomorphized over the backend and use its compile-time
+//! constants (e.g. [`NetworkBackend::IS_AUTHORITATIVE`]) to decide which systems
+//! to register. The networking transport itself lives in [`client`]/[`server`],
 //! which are added by their respective binaries.
 
+pub mod backend;
+pub mod backends;
 pub mod protocol;
 
 #[cfg(feature = "client")]
@@ -22,20 +24,14 @@ pub mod client;
 #[cfg(feature = "server")]
 pub mod server;
 
+pub use backend::{NetworkBackend, NextPlayerIntent, NextShieldRequest, NextShoot};
+pub use backends::{ClientBackend, OfflineBackend, ServerBackend};
 pub use protocol::{
     ControllingClient, LastProcessedInput, MatchInfo, MatchPhase, NetPos, Owner, PlayerInput,
     ShieldRequest, ShootRequest, StartMatch, Winner, YouAreOwner,
 };
 
 use bevy::prelude::*;
-use bevy_replicon::prelude::*;
-
-use super::bot::Bot;
-use super::combat::{Dead, Health, SpawnInvulnerability};
-use super::pickup::PickupKind;
-use super::player::{Player, PlayerColor};
-use super::projectile::{Impact, Projectile, ShotColor};
-use super::shield::{ShieldCharge, Shielding};
 
 /// Default UDP port the server listens on and clients connect to.
 pub const DEFAULT_PORT: u16 = 5000;
@@ -72,66 +68,39 @@ pub fn protocol_id_for(code: &str) -> u64 {
     }
 }
 
-/// Which role this running instance plays. Inserted as a resource before the app
-/// starts so run-conditions can branch on it.
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum NetRole {
-    /// Local single-player: simulate and render, no networking.
-    Offline,
-    /// Connected client: render and send input, no local simulation.
-    OnlineClient,
-    /// Headless dedicated server: simulate and replicate, no rendering.
-    Server,
-}
-
 /// Registers the replicated components and client messages that make up the
 /// protocol. Must be called *after* `RepliconPlugins` is added (it relies on the
 /// replication registry), so it lives inside the client/server net plugins.
-pub fn register_protocol(app: &mut App) {
-    app.replicate::<NetPos>()
-        .replicate::<Player>()
-        .replicate::<PlayerColor>()
-        .replicate::<Health>()
-        .replicate::<Bot>()
-        .replicate::<Projectile>()
-        .replicate::<ShotColor>()
-        .replicate::<Impact>()
-        .replicate::<Dead>()
-        .replicate::<Owner>()
-        .replicate::<MatchInfo>()
-        .replicate::<Shielding>()
-        .replicate::<ShieldCharge>()
-        .replicate::<SpawnInvulnerability>()
-        .replicate::<PickupKind>()
-        .replicate::<LastProcessedInput>()
-        .replicate::<ControllingClient>()
-        .add_client_event::<PlayerInput>(Channel::Unreliable)
-        .add_client_event::<ShootRequest>(Channel::Ordered)
-        .add_client_event::<ShieldRequest>(Channel::Ordered)
-        .add_client_event::<StartMatch>(Channel::Ordered)
-        .add_server_event::<YouAreOwner>(Channel::Ordered);
-}
+pub fn register_protocol<B: NetworkBackend>(app: &mut App) {
+    use bevy_replicon::prelude::Channel;
 
-/// True when this instance owns the simulation: offline single-player or the
-/// dedicated server. Online clients are *not* authoritative.
-pub fn is_authoritative(role: Res<NetRole>) -> bool {
-    matches!(*role, NetRole::Offline | NetRole::Server)
-}
+    // Copy the zero-sized backend out so we can call mutating app methods
+    // without keeping an immutable borrow of `app` alive.
+    let backend = *app.world().resource::<B>();
 
-/// True only in offline single-player (drives local keyboard movement).
-pub fn is_offline(role: Res<NetRole>) -> bool {
-    *role == NetRole::Offline
-}
+    backend.register_replicated::<NetPos>(app);
+    backend.register_replicated::<super::bot::Bot>(app);
+    backend.register_replicated::<super::combat::Dead>(app);
+    backend.register_replicated::<super::combat::Health>(app);
+    backend.register_replicated::<super::combat::SpawnInvulnerability>(app);
+    backend.register_replicated::<super::pickup::PickupKind>(app);
+    backend.register_replicated::<super::player::Player>(app);
+    backend.register_replicated::<super::player::PlayerColor>(app);
+    backend.register_replicated::<super::projectile::Impact>(app);
+    backend.register_replicated::<super::projectile::Projectile>(app);
+    backend.register_replicated::<super::projectile::ShotColor>(app);
+    backend.register_replicated::<Owner>(app);
+    backend.register_replicated::<MatchInfo>(app);
+    backend.register_replicated::<super::shield::Shielding>(app);
+    backend.register_replicated::<super::shield::ShieldCharge>(app);
+    backend.register_replicated::<LastProcessedInput>(app);
+    backend.register_replicated::<ControllingClient>(app);
 
-/// True only when connected to a remote server (drives input sending).
-pub fn is_online_client(role: Res<NetRole>) -> bool {
-    *role == NetRole::OnlineClient
-}
-
-/// True only on the headless dedicated server. Used to position client-owned
-/// players at match start (offline positions its single player separately).
-pub fn is_server(role: Res<NetRole>) -> bool {
-    *role == NetRole::Server
+    backend.register_client_event::<PlayerInput>(app, Channel::Unreliable);
+    backend.register_client_event::<ShootRequest>(app, Channel::Ordered);
+    backend.register_client_event::<ShieldRequest>(app, Channel::Ordered);
+    backend.register_client_event::<StartMatch>(app, Channel::Ordered);
+    backend.register_server_event::<YouAreOwner>(app, Channel::Ordered);
 }
 
 #[cfg(test)]
@@ -178,13 +147,15 @@ pub struct PredictedPos(pub Vec2);
 /// positions arrive at the tick rate and are interpolated. The `z` set when the
 /// sprite was attached is preserved.
 #[cfg(feature = "client")]
-pub fn sync_netpos_to_transform(
-    role: Res<NetRole>,
+pub fn sync_netpos_to_transform<B: NetworkBackend>(
     time: Res<Time>,
     // Projectiles carry an altitude and are positioned by `render_projectiles`.
-    mut query: Query<(&NetPos, Option<&PredictedPos>, &mut Transform), Without<Projectile>>,
+    mut query: Query<
+        (&NetPos, Option<&PredictedPos>, &mut Transform),
+        Without<super::projectile::Projectile>,
+    >,
 ) {
-    let online = *role == NetRole::OnlineClient;
+    let online = B::IS_ONLINE_CLIENT;
     for (pos, predicted, mut transform) in &mut query {
         // The controlled player follows its predicted position (snappy); every
         // other entity follows the replicated position (lerped online, snapped

@@ -2,26 +2,40 @@
 //!
 //! Shows the connection's round-trip time to the server in a corner of the
 //! screen so an online player can see their latency. Only meaningful for
-//! [`NetRole::OnlineClient`](super::net::NetRole): offline has no server and the
+//! [`ClientBackend`](super::net::ClientBackend): offline has no server and the
 //! dedicated server never renders, so the HUD is spawned (and the systems run)
-//! only when [`is_online_client`] holds.
+//! only for the online-client backend.
 //!
 //! The readout is spawned once at startup and persists across the lobby→match
 //! transition: it carries neither `InGame` nor `LobbyUi`, so the state-exit
 //! cleanups (`cleanup_ingame` / `despawn_lobby`) leave it untouched, exactly like
 //! the replicated `MatchInfo` singleton survives the whole session.
 
+use std::marker::PhantomData;
+
 use bevy::prelude::*;
 use bevy_replicon_renet::RenetClient;
 
-use super::net::is_online_client;
+use super::net::NetworkBackend;
 
-pub struct PingPlugin;
+pub struct PingPlugin<B: NetworkBackend> {
+    _backend: PhantomData<B>,
+}
 
-impl Plugin for PingPlugin {
+impl<B: NetworkBackend> PingPlugin<B> {
+    pub fn new() -> Self {
+        Self {
+            _backend: PhantomData,
+        }
+    }
+}
+
+impl<B: NetworkBackend> Plugin for PingPlugin<B> {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_ping_hud.run_if(is_online_client))
-            .add_systems(Update, update_ping_hud.run_if(is_online_client));
+        if B::IS_ONLINE_CLIENT {
+            app.add_systems(Startup, spawn_ping_hud)
+                .add_systems(Update, update_ping_hud);
+        }
     }
 }
 
