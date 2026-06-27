@@ -7,7 +7,7 @@ use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use super_battle_royale::GamePlugin;
 use super_battle_royale::game::net::server::ServerNetPlugin;
-use super_battle_royale::game::net::{DEFAULT_PORT, NetRole};
+use super_battle_royale::game::net::{DEFAULT_PORT, ServerBackend};
 
 /// The headless, dedicated game server.
 ///
@@ -30,8 +30,8 @@ fn main() {
             ))),
         )
         .add_plugins((LogPlugin::default(), StatesPlugin))
-        .insert_resource(NetRole::Server)
-        .add_plugins(GamePlugin)
+        .insert_resource(ServerBackend)
+        .add_plugins(GamePlugin::<ServerBackend>::new())
         .add_plugins(ServerNetPlugin {
             bind_addr,
             join_code,

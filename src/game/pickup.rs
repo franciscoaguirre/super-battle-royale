@@ -15,6 +15,8 @@
 //! replicated [`Impact`](super::projectile::Impact) signal, firing identically
 //! offline, on the host, and on every client. v1: only players collect pickups.
 
+use std::marker::PhantomData;
+
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -23,7 +25,7 @@ use super::combat::{
     DamageBoost, Dead, DoubleShot, Health, QuadShot, RapidFire, SpeedBoost, Zigzag,
 };
 use super::map::CurrentMap;
-use super::net::{NetPos, is_authoritative};
+use super::net::{NetPos, NetworkBackend};
 use super::player::{PLAYER_SIZE, Player};
 use super::projectile::{ImpactKind, spawn_impact};
 use super::state::GameState;
@@ -97,21 +99,28 @@ struct Pad {
 #[derive(Component, Clone, Copy, Debug)]
 struct PadOf(Entity);
 
-pub struct PickupPlugin;
+pub struct PickupPlugin<B: NetworkBackend> {
+    _backend: PhantomData<B>,
+}
 
-impl Plugin for PickupPlugin {
+impl<B: NetworkBackend> PickupPlugin<B> {
+    pub fn new() -> Self {
+        Self {
+            _backend: PhantomData,
+        }
+    }
+}
+
+impl<B: NetworkBackend> Plugin for PickupPlugin<B> {
     fn build(&self, app: &mut App) {
         // Authoritative: build pads at match start; refill + collect each frame.
-        app.add_systems(
-            OnEnter(GameState::Playing),
-            build_pickup_pads.run_if(is_authoritative),
-        )
-        .add_systems(
-            Update,
-            (respawn_pickups, collect_pickups)
-                .run_if(in_state(GameState::Playing))
-                .run_if(is_authoritative),
-        );
+        if B::IS_AUTHORITATIVE {
+            app.add_systems(OnEnter(GameState::Playing), build_pickup_pads)
+                .add_systems(
+                    Update,
+                    (respawn_pickups, collect_pickups).run_if(in_state(GameState::Playing)),
+                );
+        }
 
         // Client: build the orb texture, draw pad markers + pickups, animate them.
         #[cfg(feature = "client")]
@@ -479,7 +488,7 @@ mod tests {
     use super::*;
     use crate::game::combat::CombatPlugin;
     use crate::game::map::TileMap;
-    use crate::game::net::NetRole;
+    use crate::game::net::ServerBackend;
     use crate::game::projectile::{Projectile, ProjectileOwner};
     use crate::game::state::GameState;
     use bevy::state::app::StatesPlugin;
@@ -489,22 +498,21 @@ mod tests {
     /// systems only — no client render systems, so no assets are needed.
     fn test_app(map_text: &str) -> App {
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin));
-        app.insert_resource(NetRole::Server);
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            CombatPlugin::<ServerBackend>::new(),
+        ));
+        app.insert_resource(ServerBackend);
         app.insert_resource(CurrentMap(TileMap::parse(map_text)));
         app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
             Duration::from_secs_f32(1.0 / 60.0),
         ));
-        app.add_systems(
-            OnEnter(GameState::Playing),
-            build_pickup_pads.run_if(is_authoritative),
-        )
-        .add_systems(
-            Update,
-            (respawn_pickups, collect_pickups)
-                .run_if(in_state(GameState::Playing))
-                .run_if(is_authoritative),
-        );
+        app.add_systems(OnEnter(GameState::Playing), build_pickup_pads)
+            .add_systems(
+                Update,
+                (respawn_pickups, collect_pickups).run_if(in_state(GameState::Playing)),
+            );
         app.insert_state(GameState::Playing);
         app
     }

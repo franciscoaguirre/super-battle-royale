@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -7,9 +9,7 @@ use super::bot::Bot;
 use super::combat::Health;
 use super::combat::{Dead, SpeedBoost, give_spawn_invulnerability};
 use super::map::{ArenaBounds, CurrentMap, TileMap};
-use super::net::{NetPos, is_authoritative, is_offline};
-#[cfg(feature = "client")]
-use super::shield::ShieldState;
+use super::net::{NetPos, NetworkBackend, NextPlayerIntent};
 use super::shield::{ShieldTickSet, insert_shield};
 use super::state::GameState;
 
@@ -98,59 +98,124 @@ impl PlayerColor {
 #[derive(Resource, Default)]
 pub struct SelectedColor(pub PlayerColor);
 
-pub struct PlayerPlugin;
+pub struct PlayerPlugin<B: NetworkBackend> {
+    _backend: PhantomData<B>,
+}
 
-impl Plugin for PlayerPlugin {
+impl<B: NetworkBackend> PlayerPlugin<B> {
+    pub fn new() -> Self {
+        Self {
+            _backend: PhantomData,
+        }
+    }
+}
+
+impl<B: NetworkBackend> Plugin for PlayerPlugin<B> {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SelectedColor>()
-            // Offline spawns the single local player; online clients receive
-            // players via replication, the server via [`on_client_authorized`].
-            .add_systems(OnEnter(GameState::Playing), spawn_player.run_if(is_offline))
-            // Movement runs on a fixed timestep wherever the simulation is
-            // authoritative, so prediction replay on the client matches it exactly.
-            .add_systems(
+        app.init_resource::<SelectedColor>();
+
+        // Offline spawns the single local player; online clients receive players
+        // via replication, the server via [`on_client_authorized`].
+        if B::IS_OFFLINE {
+            app.add_systems(OnEnter(GameState::Playing), spawn_player::<B>)
+                .init_resource::<NextPlayerIntent>()
+                .add_systems(
+                    FixedUpdate,
+                    apply_offline_intent
+                        .run_if(in_state(GameState::Playing))
+                        .before(apply_player_intent)
+                        .before(ShieldTickSet),
+                );
+        }
+
+        // Movement runs on a fixed timestep wherever the simulation is
+        // authoritative, so prediction replay on the client matches it exactly.
+        if B::IS_AUTHORITATIVE {
+            app.add_systems(
                 FixedUpdate,
                 apply_player_intent
                     .run_if(in_state(GameState::Playing))
-                    .run_if(is_authoritative)
                     .after(ShieldTickSet),
             );
+        }
 
         // Local input and rendering only exist in the windowed client.
         #[cfg(feature = "client")]
         app.add_systems(
             Update,
             (
-                read_local_input
-                    .run_if(in_state(GameState::Playing))
-                    .run_if(is_offline),
-                read_local_shield
-                    .run_if(in_state(GameState::Playing))
-                    .run_if(is_offline)
-                    .before(ShieldTickSet),
                 attach_player_sprite.run_if(in_state(GameState::Playing)),
                 attach_health_cracks.run_if(in_state(GameState::Playing)),
                 update_health_cracks.run_if(in_state(GameState::Playing)),
             ),
         );
+
+        #[cfg(feature = "client")]
+        if B::IS_OFFLINE {
+            app.add_systems(
+                Update,
+                (
+                    sample_local_input::<B>,
+                    sample_local_shield::<B>.before(ShieldTickSet),
+                )
+                    .run_if(in_state(GameState::Playing)),
+            );
+        }
     }
 }
 
 /// Spawns the local player for offline single-player. The sprite is attached by
 /// [`attach_player_sprite`], so this only sets up the logical entity.
-fn spawn_player(mut commands: Commands, selected: Res<SelectedColor>, map: Res<CurrentMap>) {
+fn spawn_player<B: NetworkBackend>(
+    mut commands: Commands,
+    backend: Res<B>,
+    selected: Res<SelectedColor>,
+    map: Res<CurrentMap>,
+) {
     let spawn = map.0.spawn_points().first().copied().unwrap_or(Vec2::ZERO);
-    let entity = commands
-        .spawn((
-            Player,
-            selected.0,
-            NetPos(spawn),
-            PlayerIntent::default(),
-            super::InGame,
-        ))
-        .id();
+    let entity = backend.spawn_actor(
+        &mut commands,
+        (Player, selected.0, NetPos(spawn), PlayerIntent::default()),
+    );
     insert_shield(&mut commands, entity);
     give_spawn_invulnerability(&mut commands, entity);
+}
+
+/// Offline: copy the sampled input resource into the local player's intent so
+/// [`apply_player_intent`] can consume it on the fixed tick.
+fn apply_offline_intent(
+    next: Res<NextPlayerIntent>,
+    mut players: Query<&mut PlayerIntent, With<Player>>,
+) {
+    for mut intent in &mut players {
+        intent.0 = next.0;
+    }
+}
+
+/// Offline: sample local keyboard input and route it through the backend.
+#[cfg(feature = "client")]
+fn sample_local_input<B: NetworkBackend>(
+    input: Res<ButtonInput<KeyCode>>,
+    backend: Res<B>,
+    mut commands: Commands,
+) {
+    let dir = input_direction(&input);
+    backend.apply_movement_input(&mut commands, dir, None);
+}
+
+/// Offline: sample local shield input and route it through the backend.
+#[cfg(feature = "client")]
+fn sample_local_shield<B: NetworkBackend>(
+    input: Res<ButtonInput<KeyCode>>,
+    backend: Res<B>,
+    mut commands: Commands,
+    mut last: Local<bool>,
+) {
+    let pressed = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
+    if pressed != *last {
+        backend.apply_shield_input(&mut commands, pressed);
+        *last = pressed;
+    }
 }
 
 /// Advances a player one fixed step from a movement direction: move `dir`
@@ -224,30 +289,6 @@ pub(crate) fn input_direction(input: &ButtonInput<KeyCode>) -> Vec2 {
         direction.normalize()
     } else {
         direction
-    }
-}
-
-/// Offline: feed local keyboard input into the (single) player's intent.
-#[cfg(feature = "client")]
-fn read_local_input(
-    input: Res<ButtonInput<KeyCode>>,
-    mut query: Query<&mut PlayerIntent, With<Player>>,
-) {
-    let dir = input_direction(&input);
-    for mut intent in &mut query {
-        intent.0 = dir;
-    }
-}
-
-/// Offline: set the local player's shield request from Left/Right Shift.
-#[cfg(feature = "client")]
-fn read_local_shield(
-    input: Res<ButtonInput<KeyCode>>,
-    mut query: Query<&mut ShieldState, With<Player>>,
-) {
-    let pressed = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
-    for mut shield in &mut query {
-        shield.requested = pressed;
     }
 }
 

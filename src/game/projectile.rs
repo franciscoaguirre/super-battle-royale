@@ -12,6 +12,8 @@
 //! and motion run on the authoritative side (offline + server); rendering runs on
 //! the client.
 
+use std::marker::PhantomData;
+
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -19,14 +21,14 @@ use serde::{Deserialize, Serialize};
 use super::bot::{Bot, BotIntent};
 use super::combat::RapidFire;
 use super::map::{ArenaBounds, CurrentMap};
-use super::net::{NetPos, is_authoritative};
+#[cfg(feature = "client")]
+use super::net::NextShoot;
+use super::net::{NetPos, NetworkBackend};
 use super::player::{Player, PlayerColor, PlayerIntent};
 use super::state::GameState;
 
 #[cfg(feature = "client")]
 use super::combat::{Dead, DoubleShot, QuadShot, SpawnInvulnerability, Zigzag};
-#[cfg(feature = "client")]
-use super::net::is_offline;
 
 /// Constant horizontal speed of a shot, in world units per second.
 const PROJECTILE_SPEED: f32 = 360.0;
@@ -184,32 +186,53 @@ pub struct Impact(pub ImpactKind);
 #[derive(Component)]
 struct ImpactLifetime(Timer);
 
-pub struct ProjectilePlugin;
+pub struct ProjectilePlugin<B: NetworkBackend> {
+    _backend: PhantomData<B>,
+}
 
-impl Plugin for ProjectilePlugin {
+impl<B: NetworkBackend> ProjectilePlugin<B> {
+    pub fn new() -> Self {
+        Self {
+            _backend: PhantomData,
+        }
+    }
+}
+
+impl<B: NetworkBackend> Plugin for ProjectilePlugin<B> {
     fn build(&self, app: &mut App) {
         // Firing and motion run wherever we're authoritative (server + offline).
-        app.add_systems(
-            Update,
-            (
-                ensure_shooting_components,
-                update_facing,
-                tick_cooldowns,
-                simulate_projectiles,
-                collide_projectiles.after(simulate_projectiles),
-                tick_impacts,
-            )
-                .run_if(in_state(GameState::Playing))
-                .run_if(is_authoritative),
-        );
+        if B::IS_AUTHORITATIVE {
+            app.add_systems(
+                Update,
+                (
+                    ensure_shooting_components,
+                    update_facing,
+                    tick_cooldowns,
+                    simulate_projectiles,
+                    collide_projectiles.after(simulate_projectiles),
+                    tick_impacts,
+                )
+                    .run_if(in_state(GameState::Playing)),
+            );
+        }
 
         // Local input + rendering + sound live only in the windowed client.
         #[cfg(feature = "client")]
         {
+            if B::IS_OFFLINE {
+                app.init_resource::<NextShoot>().add_systems(
+                    Update,
+                    (
+                        sample_local_shoot::<B>,
+                        apply_offline_shoot.after(sample_local_shoot::<B>),
+                    )
+                        .run_if(in_state(GameState::Playing)),
+                );
+            }
+
             app.add_systems(
                 Update,
                 (
-                    offline_shoot.run_if(is_offline),
                     attach_projectile_sprite,
                     play_shoot_sound,
                     play_impact_sounds,
@@ -453,11 +476,23 @@ fn spawn_projectile(
     }
 }
 
-/// Offline single-player: fire the local player on Space.
+/// Offline: sample the shoot key and route it through the backend.
+#[cfg(feature = "client")]
+fn sample_local_shoot<B: NetworkBackend>(
+    keys: Res<ButtonInput<KeyCode>>,
+    backend: Res<B>,
+    mut commands: Commands,
+) {
+    if keys.just_pressed(KeyCode::Space) {
+        backend.apply_shoot_input(&mut commands);
+    }
+}
+
+/// Offline: fire the local player when the backend has signaled a shoot request.
 #[cfg(feature = "client")]
 #[allow(clippy::type_complexity)]
-fn offline_shoot(
-    keys: Res<ButtonInput<KeyCode>>,
+fn apply_offline_shoot(
+    mut next: ResMut<NextShoot>,
     mut commands: Commands,
     mut players: Query<
         (
@@ -478,9 +513,11 @@ fn offline_shoot(
         ),
     >,
 ) {
-    if !keys.just_pressed(KeyCode::Space) {
+    if !next.0 {
         return;
     }
+    next.0 = false;
+
     for (entity, pos, facing, mut cooldown, color, double, quad, zigzag) in &mut players {
         let mods = ShotMods::from_buffs(double.is_some(), quad.is_some(), zigzag.is_some());
         try_fire(

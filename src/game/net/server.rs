@@ -19,7 +19,7 @@ use bevy_replicon_renet::{
 
 use super::{
     ControllingClient, LastProcessedInput, MatchInfo, MatchPhase, NetPos, Owner, PlayerInput,
-    ShieldRequest, ShootRequest, StartMatch, Winner, YouAreOwner, is_server, protocol_id_for,
+    ServerBackend, ShieldRequest, ShootRequest, StartMatch, Winner, YouAreOwner, protocol_id_for,
     register_protocol,
 };
 use crate::game::combat::{
@@ -81,21 +81,17 @@ pub struct ServerNetPlugin {
 impl Plugin for ServerNetPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((RepliconPlugins, RepliconRenetPlugins));
-        register_protocol(app);
+        register_protocol::<ServerBackend>(app);
         app.insert_resource(BindAddr(self.bind_addr))
             .insert_resource(ServerProtocolId(protocol_id_for(&self.join_code)))
             .add_systems(Startup, setup_server)
             // Place lobby-joined players at spawn points once the map is known.
-            .add_systems(
-                OnEnter(GameState::Playing),
-                position_players.run_if(is_server),
-            )
+            .add_systems(OnEnter(GameState::Playing), position_players)
             // Apply one buffered input per fixed tick, before movement consumes it.
             .add_systems(
                 FixedUpdate,
                 dequeue_inputs
                     .run_if(in_state(GameState::Playing))
-                    .run_if(is_server)
                     .before(apply_player_intent),
             )
             // A client is `AuthorizedClient` once its protocol hash matches ours.

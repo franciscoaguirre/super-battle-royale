@@ -1,10 +1,11 @@
+use std::marker::PhantomData;
+
 use bevy::prelude::*;
-use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::combat::{Dead, SpawnInvulnerability, give_spawn_invulnerability};
 use super::map::{ArenaBounds, CurrentMap};
-use super::net::{NetPos, is_authoritative};
+use super::net::{NetPos, NetworkBackend};
 use super::player::PlayerColor;
 use super::projectile::{
     Facing, FireCooldown, Projectile, ProjectileOwner, ShotMods, tick_cooldowns, try_fire,
@@ -43,29 +44,37 @@ pub struct BotAI {
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct BotIntent(pub Vec2);
 
-pub struct BotPlugin;
+pub struct BotPlugin<B: NetworkBackend> {
+    _backend: PhantomData<B>,
+}
 
-impl Plugin for BotPlugin {
+impl<B: NetworkBackend> BotPlugin<B> {
+    pub fn new() -> Self {
+        Self {
+            _backend: PhantomData,
+        }
+    }
+}
+
+impl<B: NetworkBackend> Plugin for BotPlugin<B> {
     fn build(&self, app: &mut App) {
         // Enemies are simulated wherever we're authoritative (server or offline).
-        app.add_systems(
-            OnEnter(GameState::Playing),
-            spawn_bots.run_if(is_authoritative),
-        )
-        .add_systems(
-            Update,
-            (
-                select_bot_targets,
-                bot_shield.after(ShieldTickSet),
-                update_bot_intent,
-                apply_bot_intent.after(ShieldTickSet),
-                update_bot_facing,
-                bot_shoot.after(tick_cooldowns),
-            )
-                .chain()
-                .run_if(in_state(GameState::Playing))
-                .run_if(is_authoritative),
-        );
+        if B::IS_AUTHORITATIVE {
+            app.add_systems(OnEnter(GameState::Playing), spawn_bots::<B>)
+                .add_systems(
+                    Update,
+                    (
+                        select_bot_targets,
+                        bot_shield.after(ShieldTickSet),
+                        update_bot_intent,
+                        apply_bot_intent.after(ShieldTickSet),
+                        update_bot_facing,
+                        bot_shoot.after(tick_cooldowns),
+                    )
+                        .chain()
+                        .run_if(in_state(GameState::Playing)),
+                );
+        }
 
         #[cfg(feature = "client")]
         app.add_systems(
@@ -75,9 +84,14 @@ impl Plugin for BotPlugin {
     }
 }
 
-/// Spawns the authoritative bot entities. `Replicated` is inert offline (no
-/// server running) and drives replication on the dedicated server.
-fn spawn_bots(mut commands: Commands, map: Res<CurrentMap>, config: Res<MatchConfig>) {
+/// Spawns the authoritative bot entities. The backend decides whether to mark
+/// them as replicated.
+fn spawn_bots<B: NetworkBackend>(
+    mut commands: Commands,
+    backend: Res<B>,
+    map: Res<CurrentMap>,
+    config: Res<MatchConfig>,
+) {
     let spawns = map.0.spawn_points();
     let count = config.bot_count as usize;
 
@@ -89,8 +103,9 @@ fn spawn_bots(mut commands: Commands, map: Res<CurrentMap>, config: Res<MatchCon
             spawns[(i + 1) % spawns.len()]
         };
 
-        let entity = commands
-            .spawn((
+        let entity = backend.spawn_actor(
+            &mut commands,
+            (
                 Bot,
                 BotAI {
                     target: None,
@@ -99,10 +114,8 @@ fn spawn_bots(mut commands: Commands, map: Res<CurrentMap>, config: Res<MatchCon
                 BotIntent::default(),
                 PlayerColor::Red,
                 NetPos(pos),
-                Replicated,
-                super::InGame,
-            ))
-            .id();
+            ),
+        );
         insert_shield(&mut commands, entity);
         give_spawn_invulnerability(&mut commands, entity);
     }

@@ -6,6 +6,8 @@
 //! incoming path (with the reflector as the new owner). After that window the
 //! shield still **destroys** shots, but no longer reflects them.
 
+use std::marker::PhantomData;
+
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -15,10 +17,12 @@ use bevy::asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use super::combat::Dead;
-use super::net::{NetPos, is_authoritative};
-use super::player::PLAYER_SIZE;
 #[cfg(feature = "client")]
 use super::combat::SpawnInvulnerability;
+#[cfg(feature = "client")]
+use super::net::NextShieldRequest;
+use super::net::{NetPos, NetworkBackend};
+use super::player::PLAYER_SIZE;
 #[cfg(feature = "client")]
 use super::player::{Player, PlayerColor};
 use super::projectile::{PROJECTILE_RADIUS, ProjectileOwner, ProjectileVelocity};
@@ -109,17 +113,28 @@ struct ShieldTextures {
     ring: Handle<Image>,
 }
 
-pub struct ShieldPlugin;
+pub struct ShieldPlugin<B: NetworkBackend> {
+    _backend: PhantomData<B>,
+}
 
-impl Plugin for ShieldPlugin {
+impl<B: NetworkBackend> ShieldPlugin<B> {
+    pub fn new() -> Self {
+        Self {
+            _backend: PhantomData,
+        }
+    }
+}
+
+impl<B: NetworkBackend> Plugin for ShieldPlugin<B> {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            tick_shields
-                .in_set(ShieldTickSet)
-                .run_if(in_state(GameState::Playing))
-                .run_if(is_authoritative),
-        );
+        if B::IS_AUTHORITATIVE {
+            app.add_systems(
+                Update,
+                tick_shields
+                    .in_set(ShieldTickSet)
+                    .run_if(in_state(GameState::Playing)),
+            );
+        }
 
         #[cfg(feature = "client")]
         {
@@ -130,6 +145,33 @@ impl Plugin for ShieldPlugin {
                     update_shield_visuals.run_if(in_state(GameState::Playing)),
                 ),
             );
+
+            if B::IS_OFFLINE {
+                app.add_systems(
+                    Update,
+                    apply_offline_shield
+                        .run_if(in_state(GameState::Playing))
+                        .before(ShieldTickSet),
+                );
+            }
+        }
+    }
+}
+
+/// Offline: copy the sampled shield request into the local player's shield state.
+/// Only runs when the request resource has changed, so tests (and other code)
+/// can drive [`ShieldState::requested`] directly without an input resource.
+#[cfg(feature = "client")]
+fn apply_offline_shield(
+    request: Option<Res<NextShieldRequest>>,
+    mut players: Query<&mut ShieldState, With<super::player::Player>>,
+) {
+    let Some(request) = request else {
+        return;
+    };
+    if request.is_changed() {
+        for mut shield in &mut players {
+            shield.requested = request.0;
         }
     }
 }
@@ -424,14 +466,18 @@ fn player_glow(color: PlayerColor) -> Color {
 mod tests {
     use super::*;
     use crate::game::InGame;
-    use crate::game::net::NetRole;
+    use crate::game::net::OfflineBackend;
     use crate::game::player::{Player, PlayerColor};
     use bevy::state::app::StatesPlugin;
 
     fn test_app() -> App {
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, StatesPlugin, ShieldPlugin));
-        app.insert_resource(NetRole::Offline);
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            ShieldPlugin::<OfflineBackend>::new(),
+        ));
+        app.insert_resource(OfflineBackend);
         app.insert_state(GameState::Playing);
         // `init_shield_textures` needs `Assets<Image>` which MinimalPlugins does not
         // register; provide the resource directly so the attach system can run.
@@ -446,6 +492,23 @@ mod tests {
     /// the actor (player/bot) is not `InGame` and survives round cleanup. If the
     /// children are `InGame`, `cleanup_ingame` despawns them while the
     /// `HasShieldVisuals` marker stays behind, preventing re-attachment.
+    #[test]
+    fn diag_tick_shields_runs() {
+        let mut app = test_app();
+        let e = app.world_mut().spawn(ShieldState::default()).id();
+        app.update();
+        app.world_mut().get_mut::<ShieldState>(e).unwrap().requested = true;
+        for i in 0..10 {
+            app.update();
+            eprintln!(
+                "update {} shielding={:?}",
+                i,
+                app.world().get::<Shielding>(e)
+            );
+        }
+        assert!(app.world().get::<Shielding>(e).is_some());
+    }
+
     #[test]
     fn shield_visuals_survive_ingame_cleanup() {
         let mut app = test_app();

@@ -9,19 +9,31 @@
 //! The UI is deliberately button-only (no text entry): the join code is supplied
 //! on the command line / `JOIN_CODE` env var, not typed here.
 
+use std::marker::PhantomData;
+
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 
 use super::map::{self, MAPS};
-use super::net::{MatchInfo, MatchPhase, NetRole, StartMatch, Winner, YouAreOwner, is_offline};
+use super::net::{MatchInfo, MatchPhase, NetworkBackend, StartMatch, Winner, YouAreOwner};
 use super::state::{GameState, MatchConfig};
 
 /// Largest bot count the owner can dial up to in the lobby.
 const MAX_BOTS: u8 = 16;
 
-pub struct LobbyPlugin;
+pub struct LobbyPlugin<B: NetworkBackend> {
+    _backend: PhantomData<B>,
+}
 
-impl Plugin for LobbyPlugin {
+impl<B: NetworkBackend> LobbyPlugin<B> {
+    pub fn new() -> Self {
+        Self {
+            _backend: PhantomData,
+        }
+    }
+}
+
+impl<B: NetworkBackend> Plugin for LobbyPlugin<B> {
     fn build(&self, app: &mut App) {
         app.init_resource::<IsOwner>()
             .init_resource::<LobbyDraft>()
@@ -29,19 +41,19 @@ impl Plugin for LobbyPlugin {
                 OnEnter(GameState::Lobby),
                 (spawn_lobby_camera, spawn_lobby_ui),
             )
-            .add_systems(
-                OnEnter(GameState::Lobby),
-                set_offline_owner.run_if(is_offline),
-            )
             .add_systems(OnExit(GameState::Lobby), despawn_lobby)
             .add_systems(
                 Update,
-                (handle_buttons, update_labels, update_visibility)
+                (handle_buttons::<B>, update_labels, update_visibility::<B>)
                     .run_if(in_state(GameState::Lobby)),
             )
             // The owner client learns it's the owner (no-op in other modes).
             // Online clients follow the match lifecycle via `match_flow`.
             .add_observer(on_you_are_owner);
+
+        if B::IS_OFFLINE {
+            app.add_systems(OnEnter(GameState::Lobby), set_offline_owner);
+        }
     }
 }
 
@@ -268,11 +280,10 @@ fn despawn_lobby(mut commands: Commands, query: Query<Entity, With<LobbyUi>>) {
 
 /// Applies button clicks: cycles the map, adjusts the bot count, or starts the
 /// match. Starting is gated on ownership here (the server validates it too).
-fn handle_buttons(
+fn handle_buttons<B: NetworkBackend>(
     interactions: Query<(&Interaction, &LobbyButton), Changed<Interaction>>,
     mut draft: ResMut<LobbyDraft>,
     is_owner: Res<IsOwner>,
-    role: Res<NetRole>,
     mut commands: Commands,
     mut config: ResMut<MatchConfig>,
     mut next: ResMut<NextState<GameState>>,
@@ -299,32 +310,28 @@ fn handle_buttons(
                 if !is_owner.0 {
                     continue;
                 }
-                match *role {
-                    NetRole::Offline => {
-                        // Apply the config and start locally. Insert the map
-                        // resources *before* the state change: the OnEnter(Playing)
-                        // spawn systems read them.
-                        config.map_index = draft.map_index;
-                        config.bot_count = draft.bot_count;
-                        map::insert_map_resources(&mut commands, draft.map_index);
-                        // The match-state singleton (local, not replicated offline)
-                        // that `match_flow` drives and the winner banner reads.
-                        commands.spawn(MatchInfo {
-                            map_index: draft.map_index,
-                            round: 0,
-                            phase: MatchPhase::Playing,
-                            winner: Winner::Draw,
-                        });
-                        next.set(GameState::Playing);
-                    }
-                    NetRole::OnlineClient => {
-                        // Ask the server to start; we transition when MatchInfo arrives.
-                        commands.client_trigger(StartMatch {
-                            map_index: draft.map_index,
-                            bot_count: draft.bot_count,
-                        });
-                    }
-                    NetRole::Server => {}
+                if B::IS_OFFLINE {
+                    // Apply the config and start locally. Insert the map
+                    // resources *before* the state change: the OnEnter(Playing)
+                    // spawn systems read them.
+                    config.map_index = draft.map_index;
+                    config.bot_count = draft.bot_count;
+                    map::insert_map_resources(&mut commands, draft.map_index);
+                    // The match-state singleton (local, not replicated offline)
+                    // that `match_flow` drives and the winner banner reads.
+                    commands.spawn(MatchInfo {
+                        map_index: draft.map_index,
+                        round: 0,
+                        phase: MatchPhase::Playing,
+                        winner: Winner::Draw,
+                    });
+                    next.set(GameState::Playing);
+                } else if B::IS_ONLINE_CLIENT {
+                    // Ask the server to start; we transition when MatchInfo arrives.
+                    commands.client_trigger(StartMatch {
+                        map_index: draft.map_index,
+                        bot_count: draft.bot_count,
+                    });
                 }
             }
         }
@@ -353,23 +360,23 @@ fn update_labels(
 
 /// Shows exactly one section: "connecting" (online, not yet connected), the
 /// owner's config panel (owner), or "waiting for host" (connected non-owner).
-fn update_visibility(
-    role: Res<NetRole>,
+fn update_visibility<B: NetworkBackend>(
     is_owner: Res<IsOwner>,
     client_state: Option<Res<State<ClientState>>>,
     mut sections: Query<(&mut Node, &LobbySection)>,
 ) {
     // Offline is always "connected"; online depends on the replicon client state.
-    let connected = match *role {
-        NetRole::Offline => true,
-        _ => client_state
+    let connected = if B::IS_OFFLINE {
+        true
+    } else {
+        client_state
             .map(|s| *s.get() == ClientState::Connected)
-            .unwrap_or(false),
+            .unwrap_or(false)
     };
 
     for (mut node, section) in &mut sections {
         let visible = match section {
-            LobbySection::Connecting => *role == NetRole::OnlineClient && !connected,
+            LobbySection::Connecting => B::IS_ONLINE_CLIENT && !connected,
             LobbySection::Config => connected && is_owner.0,
             LobbySection::Waiting => connected && !is_owner.0,
         };

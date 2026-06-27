@@ -9,12 +9,14 @@
 //! "Last one standing" counts every combatant (players *and* bots), so the
 //! survivor may be a player, a bot, or a draw if the last two die together.
 
+use std::marker::PhantomData;
+
 use bevy::prelude::*;
 
 use super::bot::Bot;
 use super::combat::{Dead, Health};
 use super::map::{self, MAPS};
-use super::net::{MatchInfo, MatchPhase, Winner, is_authoritative, is_online_client};
+use super::net::{MatchInfo, MatchPhase, NetworkBackend, Winner};
 use super::player::{Player, PlayerColor};
 use super::state::{GameState, MatchConfig};
 
@@ -25,30 +27,37 @@ const ANNOUNCE_SECS: f32 = 4.0;
 #[derive(Resource)]
 struct IntermissionTimer(Timer);
 
-pub struct MatchFlowPlugin;
+pub struct MatchFlowPlugin<B: NetworkBackend> {
+    _backend: PhantomData<B>,
+}
 
-impl Plugin for MatchFlowPlugin {
+impl<B: NetworkBackend> MatchFlowPlugin<B> {
+    pub fn new() -> Self {
+        Self {
+            _backend: PhantomData,
+        }
+    }
+}
+
+impl<B: NetworkBackend> Plugin for MatchFlowPlugin<B> {
     fn build(&self, app: &mut App) {
         // Authoritative: detect the winner, run the announcement, advance maps.
-        app.add_systems(
-            Update,
-            check_for_winner
-                .run_if(in_state(GameState::Playing))
-                .run_if(is_authoritative),
-        )
-        .add_systems(
-            OnEnter(GameState::GameOver),
-            start_intermission.run_if(is_authoritative),
-        )
-        .add_systems(
-            Update,
-            advance_after_intermission
-                .run_if(in_state(GameState::GameOver))
-                .run_if(is_authoritative),
-        );
+        if B::IS_AUTHORITATIVE {
+            app.add_systems(
+                Update,
+                check_for_winner.run_if(in_state(GameState::Playing)),
+            )
+            .add_systems(OnEnter(GameState::GameOver), start_intermission)
+            .add_systems(
+                Update,
+                advance_after_intermission.run_if(in_state(GameState::GameOver)),
+            );
+        }
 
         // Online clients mirror their local state from the replicated MatchInfo.
-        app.add_systems(Update, follow_match_phase.run_if(is_online_client));
+        if B::IS_ONLINE_CLIENT {
+            app.add_systems(Update, follow_match_phase);
+        }
 
         // Client: announce the winner over the frozen scene during GameOver.
         #[cfg(feature = "client")]
@@ -215,7 +224,7 @@ mod tests {
     use crate::game::combat::CombatPlugin;
     use crate::game::map::{CurrentMap, TileMap};
     use crate::game::net::NetPos;
-    use crate::game::net::NetRole;
+    use crate::game::net::OfflineBackend;
     use crate::game::shield::{ShieldCharge, ShieldPlugin, ShieldState, ShieldStatus, Shielding};
     use crate::game::state::MatchConfig;
     use bevy::state::app::StatesPlugin;
@@ -228,11 +237,11 @@ mod tests {
         app.add_plugins((
             MinimalPlugins,
             StatesPlugin,
-            CombatPlugin,
-            ShieldPlugin,
-            MatchFlowPlugin,
+            CombatPlugin::<OfflineBackend>::new(),
+            ShieldPlugin::<OfflineBackend>::new(),
+            MatchFlowPlugin::<OfflineBackend>::new(),
         ));
-        app.insert_resource(NetRole::Offline);
+        app.insert_resource(OfflineBackend);
         app.insert_resource(CurrentMap(TileMap::parse("wsw")));
         app.init_resource::<MatchConfig>();
         app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
@@ -353,10 +362,10 @@ mod tests {
         app.update();
 
         // Raise the winner's shield and let it tick for a few frames.
-        app.world_mut()
-            .get_mut::<ShieldState>(winner)
-            .unwrap()
-            .requested = true;
+        app.world_mut().entity_mut(winner).insert(ShieldState {
+            requested: true,
+            ..ShieldState::default()
+        });
         for _ in 0..10 {
             app.update();
         }

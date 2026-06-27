@@ -1,6 +1,9 @@
+use std::marker::PhantomData;
+
 use bevy::prelude::*;
 
 use super::InGame;
+use super::net::NetworkBackend;
 use super::player::Player;
 
 /// The interchangeable footstep clips, relative to the `assets/` dir. One is
@@ -22,19 +25,29 @@ const STEP_VOLUME: f32 = 0.6;
 /// which filters out floating-point jitter when standing still.
 const MOVE_EPSILON_SQ: f32 = 0.01 * 0.01;
 
-pub struct FootstepsPlugin;
+pub struct FootstepsPlugin<B: NetworkBackend> {
+    _backend: PhantomData<B>,
+}
 
-impl Plugin for FootstepsPlugin {
+impl<B: NetworkBackend> FootstepsPlugin<B> {
+    pub fn new() -> Self {
+        Self {
+            _backend: PhantomData,
+        }
+    }
+}
+
+impl<B: NetworkBackend> Plugin for FootstepsPlugin<B> {
     fn build(&self, app: &mut App) {
         // Footsteps are about the *local* player, which only exists in offline
         // single-player; online clients render remote players whose footsteps we
         // don't simulate locally.
-        app.insert_resource(FootstepState::new()).add_systems(
-            Update,
-            play_footsteps
-                .run_if(in_state(super::state::GameState::Playing))
-                .run_if(super::net::is_offline),
-        );
+        if B::IS_OFFLINE {
+            app.insert_resource(FootstepState::new()).add_systems(
+                Update,
+                play_footsteps.run_if(in_state(super::state::GameState::Playing)),
+            );
+        }
     }
 }
 

@@ -5,12 +5,14 @@
 //! clients hide a player or bot during their respawn delay. Everything here
 //! runs on the authoritative side (server + offline).
 
+use std::marker::PhantomData;
+
 use bevy::ecs::component::Mutable;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::bot::Bot;
-use super::net::{NetPos, is_authoritative};
+use super::net::{NetPos, NetworkBackend};
 use super::player::{PLAYER_SIZE, Player};
 use super::projectile::{
     ImpactKind, PROJECTILE_RADIUS, Projectile, ProjectileOwner, ProjectileVelocity, spawn_impact,
@@ -149,49 +151,56 @@ fn tick_buff<B: Component<Mutability = Mutable> + BuffTimer>(
     }
 }
 
-pub struct CombatPlugin;
+pub struct CombatPlugin<B: NetworkBackend> {
+    _backend: PhantomData<B>,
+}
 
-impl Plugin for CombatPlugin {
+impl<B: NetworkBackend> CombatPlugin<B> {
+    pub fn new() -> Self {
+        Self {
+            _backend: PhantomData,
+        }
+    }
+}
+
+impl<B: NetworkBackend> Plugin for CombatPlugin<B> {
     fn build(&self, app: &mut App) {
         // Authoritative: give players health and resolve hits → death. Chained so
         // damage and death settle within a single frame. Death is permanent for
         // the round (no respawn); combatants are revived on the next level.
-        app.add_systems(
-            Update,
-            (
-                ensure_health,
-                tick_spawn_invulnerability,
-                apply_projectile_hits,
-                apply_damage_and_blocks,
-                apply_parry_reflections,
-                apply_pending_heals,
-                handle_deaths,
+        if B::IS_AUTHORITATIVE {
+            app.add_systems(
+                Update,
+                (
+                    ensure_health,
+                    tick_spawn_invulnerability,
+                    apply_projectile_hits,
+                    apply_damage_and_blocks,
+                    apply_parry_reflections,
+                    apply_pending_heals,
+                    handle_deaths,
+                )
+                    .chain()
+                    .run_if(in_state(GameState::Playing)),
             )
-                .chain()
-                .run_if(in_state(GameState::Playing))
-                .run_if(is_authoritative),
-        )
-        // Revive survivors (persistent online players) when a new round starts.
-        .add_systems(
-            OnEnter(GameState::Playing),
-            reset_combatants.run_if(is_authoritative),
-        );
+            // Revive survivors (persistent online players) when a new round starts.
+            .add_systems(OnEnter(GameState::Playing), reset_combatants);
 
-        // Authoritative: expire timed power-up buffs once their timers run out.
-        // Unordered — a one-frame-stale buff is imperceptible.
-        app.add_systems(
-            Update,
-            (
-                tick_buff::<SpeedBoost>,
-                tick_buff::<RapidFire>,
-                tick_buff::<DamageBoost>,
-                tick_buff::<DoubleShot>,
-                tick_buff::<QuadShot>,
-                tick_buff::<Zigzag>,
-            )
-                .run_if(in_state(GameState::Playing))
-                .run_if(is_authoritative),
-        );
+            // Authoritative: expire timed power-up buffs once their timers run out.
+            // Unordered — a one-frame-stale buff is imperceptible.
+            app.add_systems(
+                Update,
+                (
+                    tick_buff::<SpeedBoost>,
+                    tick_buff::<RapidFire>,
+                    tick_buff::<DamageBoost>,
+                    tick_buff::<DoubleShot>,
+                    tick_buff::<QuadShot>,
+                    tick_buff::<Zigzag>,
+                )
+                    .run_if(in_state(GameState::Playing)),
+            );
+        }
 
         // Client: hide dead actors and apply spawn-invulnerability tint/opacity.
         #[cfg(feature = "client")]

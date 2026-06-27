@@ -27,8 +27,8 @@ use bevy_replicon_renet::{
 
 use super_battle_royale::game::bot::Bot;
 use super_battle_royale::game::net::{
-    ControllingClient, LastProcessedInput, NetPos, PlayerInput, ShootRequest, protocol_id_for,
-    register_protocol,
+    ControllingClient, LastProcessedInput, NetPos, PlayerInput, ServerBackend, ShootRequest,
+    protocol_id_for, register_protocol,
 };
 use super_battle_royale::game::pickup::PickupKind;
 use super_battle_royale::game::player::{Player, PlayerColor};
@@ -293,7 +293,7 @@ fn fires_and_replicates_projectile() {
 fn projectile_damages_and_kills_non_owner() {
     use super_battle_royale::game::combat::{CombatPlugin, Dead, Health};
     use super_battle_royale::game::map::{CurrentMap, TileMap};
-    use super_battle_royale::game::net::NetRole;
+    use super_battle_royale::game::net::ServerBackend;
     use super_battle_royale::game::player::Player;
     use super_battle_royale::game::projectile::{
         Impact, ImpactKind, Projectile, ProjectileOwner, ProjectileVelocity,
@@ -302,10 +302,15 @@ fn projectile_damages_and_kills_non_owner() {
     use super_battle_royale::game::state::GameState;
 
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin, ShieldPlugin));
+    app.add_plugins((
+        MinimalPlugins,
+        StatesPlugin,
+        CombatPlugin::<ServerBackend>::new(),
+        ShieldPlugin::<ServerBackend>::new(),
+    ));
     // The combat systems run only in `Playing`; start there (the default is now Lobby).
     app.insert_state(GameState::Playing);
-    app.insert_resource(NetRole::Server);
+    app.insert_resource(ServerBackend);
     app.insert_resource(CurrentMap(TileMap::parse("wsw")));
 
     // Two players on the same spot: the shooter (owner) and the target.
@@ -372,7 +377,7 @@ fn projectile_damages_and_kills_non_owner() {
 fn projectile_damages_and_kills_bot() {
     use super_battle_royale::game::combat::{CombatPlugin, Dead, Health};
     use super_battle_royale::game::map::{CurrentMap, TileMap};
-    use super_battle_royale::game::net::NetRole;
+    use super_battle_royale::game::net::ServerBackend;
     use super_battle_royale::game::player::Player;
     use super_battle_royale::game::projectile::{
         Impact, ImpactKind, Projectile, ProjectileOwner, ProjectileVelocity,
@@ -381,10 +386,15 @@ fn projectile_damages_and_kills_bot() {
     use super_battle_royale::game::state::GameState;
 
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin, ShieldPlugin));
+    app.add_plugins((
+        MinimalPlugins,
+        StatesPlugin,
+        CombatPlugin::<ServerBackend>::new(),
+        ShieldPlugin::<ServerBackend>::new(),
+    ));
     // The combat systems run only in `Playing`; start there (the default is now Lobby).
     app.insert_state(GameState::Playing);
-    app.insert_resource(NetRole::Server);
+    app.insert_resource(ServerBackend);
     app.insert_resource(CurrentMap(TileMap::parse("wsw")));
     // Drive time in fixed steps so the respawn timer is deterministic.
     app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
@@ -459,7 +469,7 @@ fn projectile_damages_and_kills_bot() {
 fn shield_parry_reflects_projectile() {
     use super_battle_royale::game::combat::{CombatPlugin, Health};
     use super_battle_royale::game::map::{CurrentMap, TileMap};
-    use super_battle_royale::game::net::NetRole;
+    use super_battle_royale::game::net::ServerBackend;
     use super_battle_royale::game::player::Player;
     use super_battle_royale::game::projectile::{
         Impact, ImpactKind, Projectile, ProjectileOwner, ProjectileVelocity,
@@ -468,9 +478,14 @@ fn shield_parry_reflects_projectile() {
     use super_battle_royale::game::state::GameState;
 
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin, ShieldPlugin));
+    app.add_plugins((
+        MinimalPlugins,
+        StatesPlugin,
+        CombatPlugin::<ServerBackend>::new(),
+        ShieldPlugin::<ServerBackend>::new(),
+    ));
     app.insert_state(GameState::Playing);
-    app.insert_resource(NetRole::Server);
+    app.insert_resource(ServerBackend);
     app.insert_resource(CurrentMap(TileMap::parse("wsw")));
 
     let attacker = app
@@ -530,7 +545,7 @@ fn shield_parry_reflects_projectile() {
 fn shield_blocks_after_parry_window() {
     use super_battle_royale::game::combat::{CombatPlugin, Health};
     use super_battle_royale::game::map::{CurrentMap, TileMap};
-    use super_battle_royale::game::net::NetRole;
+    use super_battle_royale::game::net::ServerBackend;
     use super_battle_royale::game::player::Player;
     use super_battle_royale::game::projectile::{
         Impact, ImpactKind, Projectile, ProjectileOwner, ProjectileVelocity,
@@ -539,9 +554,14 @@ fn shield_blocks_after_parry_window() {
     use super_battle_royale::game::state::GameState;
 
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin, ShieldPlugin));
+    app.add_plugins((
+        MinimalPlugins,
+        StatesPlugin,
+        CombatPlugin::<ServerBackend>::new(),
+        ShieldPlugin::<ServerBackend>::new(),
+    ));
     app.insert_state(GameState::Playing);
-    app.insert_resource(NetRole::Server);
+    app.insert_resource(ServerBackend);
     app.insert_resource(CurrentMap(TileMap::parse("wsw")));
     app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
         std::time::Duration::from_secs_f32(1.0 / 60.0),
@@ -597,16 +617,21 @@ fn shield_blocks_after_parry_window() {
 fn kill_heals_owner_by_one() {
     use super_battle_royale::game::combat::{CombatPlugin, Dead, Health};
     use super_battle_royale::game::map::{CurrentMap, TileMap};
-    use super_battle_royale::game::net::NetRole;
+    use super_battle_royale::game::net::ServerBackend;
     use super_battle_royale::game::player::Player;
     use super_battle_royale::game::projectile::{Projectile, ProjectileOwner, ProjectileVelocity};
     use super_battle_royale::game::shield::{ShieldPlugin, ShieldState};
     use super_battle_royale::game::state::GameState;
 
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin, ShieldPlugin));
+    app.add_plugins((
+        MinimalPlugins,
+        StatesPlugin,
+        CombatPlugin::<ServerBackend>::new(),
+        ShieldPlugin::<ServerBackend>::new(),
+    ));
     app.insert_state(GameState::Playing);
-    app.insert_resource(NetRole::Server);
+    app.insert_resource(ServerBackend);
     app.insert_resource(CurrentMap(TileMap::parse("wsw")));
 
     let shooter = app
@@ -664,16 +689,21 @@ fn kill_heals_owner_by_one() {
 fn spawn_invulnerability_protects_for_two_seconds() {
     use super_battle_royale::game::combat::{CombatPlugin, Health, SpawnInvulnerability};
     use super_battle_royale::game::map::{CurrentMap, TileMap};
-    use super_battle_royale::game::net::NetRole;
+    use super_battle_royale::game::net::ServerBackend;
     use super_battle_royale::game::player::Player;
     use super_battle_royale::game::projectile::{Projectile, ProjectileOwner, ProjectileVelocity};
     use super_battle_royale::game::shield::{ShieldPlugin, ShieldState};
     use super_battle_royale::game::state::GameState;
 
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin, ShieldPlugin));
+    app.add_plugins((
+        MinimalPlugins,
+        StatesPlugin,
+        CombatPlugin::<ServerBackend>::new(),
+        ShieldPlugin::<ServerBackend>::new(),
+    ));
     app.insert_state(GameState::Playing);
-    app.insert_resource(NetRole::Server);
+    app.insert_resource(ServerBackend);
     app.insert_resource(CurrentMap(TileMap::parse("wsw")));
     app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
         std::time::Duration::from_secs_f32(1.0 / 60.0),
@@ -754,14 +784,19 @@ fn shielding_drops_on_bot_death() {
     use bevy::time::TimeUpdateStrategy;
     use super_battle_royale::game::combat::{CombatPlugin, Health};
     use super_battle_royale::game::map::{CurrentMap, TileMap};
-    use super_battle_royale::game::net::NetRole;
+    use super_battle_royale::game::net::ServerBackend;
     use super_battle_royale::game::shield::{ShieldPlugin, ShieldState, ShieldStatus, Shielding};
     use super_battle_royale::game::state::GameState;
 
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, StatesPlugin, CombatPlugin, ShieldPlugin));
+    app.add_plugins((
+        MinimalPlugins,
+        StatesPlugin,
+        CombatPlugin::<ServerBackend>::new(),
+        ShieldPlugin::<ServerBackend>::new(),
+    ));
     app.insert_state(GameState::Playing);
-    app.insert_resource(NetRole::Server);
+    app.insert_resource(ServerBackend);
     app.insert_resource(CurrentMap(TileMap::parse("wsw")));
     app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
         1.0 / 60.0,
@@ -855,7 +890,8 @@ fn build_app() -> App {
         RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
         RepliconRenetPlugins,
     ));
-    register_protocol(&mut app);
+    app.insert_resource(ServerBackend);
+    register_protocol::<ServerBackend>(&mut app);
     app.finish();
     app
 }

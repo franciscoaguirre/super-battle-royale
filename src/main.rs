@@ -3,7 +3,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use bevy::prelude::*;
 use super_battle_royale::GamePlugin;
 use super_battle_royale::game::net::client::ClientNetPlugin;
-use super_battle_royale::game::net::{DEFAULT_PORT, NetRole};
+use super_battle_royale::game::net::{ClientBackend, DEFAULT_PORT, OfflineBackend};
 
 /// The windowed game client.
 ///
@@ -34,8 +34,8 @@ fn main() {
                 .or_else(|| std::env::var("JOIN_CODE").ok())
                 .unwrap_or_default();
             info!("starting online client → {server_addr}");
-            app.insert_resource(NetRole::OnlineClient)
-                .add_plugins(GamePlugin)
+            app.insert_resource(ClientBackend)
+                .add_plugins(GamePlugin::<ClientBackend>::new())
                 .add_plugins(ClientNetPlugin {
                     server_addr,
                     join_code,
@@ -43,8 +43,8 @@ fn main() {
         }
         None => {
             info!("starting offline single-player");
-            app.insert_resource(NetRole::Offline)
-                .add_plugins(GamePlugin);
+            app.insert_resource(OfflineBackend)
+                .add_plugins(GamePlugin::<OfflineBackend>::new());
         }
     }
 

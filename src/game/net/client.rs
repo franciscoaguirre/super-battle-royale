@@ -17,8 +17,8 @@ use bevy_replicon_renet::{
 };
 
 use super::{
-    ControllingClient, LastProcessedInput, NetPos, PlayerInput, Predicted, PredictedPos,
-    ShieldRequest, ShootRequest, protocol_id_for, register_protocol,
+    ClientBackend, ControllingClient, LastProcessedInput, NetPos, NetworkBackend, Predicted,
+    PredictedPos, protocol_id_for, register_protocol,
 };
 use crate::game::combat::Dead;
 use crate::game::map::{ArenaBounds, CurrentMap, TileMap};
@@ -59,7 +59,7 @@ pub struct ClientNetPlugin {
 impl Plugin for ClientNetPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((RepliconPlugins, RepliconRenetPlugins));
-        register_protocol(app);
+        register_protocol::<ClientBackend>(app);
         app.insert_resource(ServerEndpoint(self.server_addr))
             .insert_resource(ClientProtocolId(protocol_id_for(&self.join_code)))
             .init_resource::<InputSeq>()
@@ -147,6 +147,7 @@ fn tag_local_player(
 #[allow(clippy::type_complexity)]
 fn predict_and_reconcile(
     keys: Res<ButtonInput<KeyCode>>,
+    backend: Res<ClientBackend>,
     mut commands: Commands,
     mut seq: ResMut<InputSeq>,
     mut history: ResMut<InputHistory>,
@@ -166,7 +167,7 @@ fn predict_and_reconcile(
     if history.0.len() > INPUT_HISTORY_CAP {
         history.0.pop_front();
     }
-    commands.client_trigger(PlayerInput { dir, seq: this_seq });
+    backend.apply_movement_input(&mut commands, dir, Some(this_seq));
 
     let Ok((net_pos, mut predicted, ack, dead)) = player.single_mut() else {
         return; // our player isn't tagged yet
@@ -210,22 +211,27 @@ fn reconcile_pos(
 
 /// Asks the server to fire when the player presses Space. The server picks the
 /// direction from the player's tracked facing.
-fn send_shoot_request(mut commands: Commands, input: Res<ButtonInput<KeyCode>>) {
+fn send_shoot_request(
+    backend: Res<ClientBackend>,
+    mut commands: Commands,
+    input: Res<ButtonInput<KeyCode>>,
+) {
     if input.just_pressed(KeyCode::Space) {
-        commands.client_trigger(ShootRequest);
+        backend.apply_shoot_input(&mut commands);
     }
 }
 
 /// Sends shield press/release events only on state changes. The server mirrors
 /// this into the player's [`ShieldState::requested`] flag.
 fn send_shield_request(
+    backend: Res<ClientBackend>,
     mut commands: Commands,
     input: Res<ButtonInput<KeyCode>>,
     mut last: Local<bool>,
 ) {
     let pressed = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
     if pressed != *last {
-        commands.client_trigger(ShieldRequest { active: pressed });
+        backend.apply_shield_input(&mut commands, pressed);
         *last = pressed;
     }
 }
